@@ -2,7 +2,13 @@
 
 This is pure slop, see: https://pi.dev/session/#d4ce533cedbd60040f2622dc3db950e2
 
-Native diff review window for pi, powered by Glimpse and Monaco.
+It is my hope, that someone takes this idea and makes it gud.
+
+Native diff review window for pi, powered by [Glimpse](https://github.com/hazat/glimpse) and Monaco.
+
+```
+pi install git:https://github.com/badlogic/pi-diff-review
+```
 
 ## What it does
 
@@ -22,40 +28,3 @@ The command:
 - Node.js 20+
 - `pi` installed
 - internet access for the Tailwind and Monaco CDNs used by the review window
-
-## Install for a project
-
-From the target project:
-
-```bash
-pi install -l ../pi-diff-review
-```
-
-Or run pi with the extension directly:
-
-```bash
-pi -e ../pi-diff-review
-```
-
-## Manual test
-
-1. Start pi in a git repo with local changes.
-2. Run:
-   ```text
-   /diff-review
-   ```
-3. In the review window:
-   - switch between changed files on the left
-   - select lines on the original or modified side
-   - click one of the draft comment buttons
-   - write the comment in the right panel and add it
-   - optionally add overall feedback
-4. Click `Put feedback in pi editor`.
-5. The review window closes and the generated feedback prompt is inserted into pi's editor.
-6. Edit it if needed and press Enter.
-
-## Notes
-
-- The review source is the entire worktree: tracked changes are taken from `git diff HEAD`, and untracked files are included via `git ls-files --others --exclude-standard`.
-- Repositories without a `HEAD` still show untracked files.
-- Binary files are not specially handled yet.

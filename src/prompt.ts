@@ -4,10 +4,11 @@ function formatLocation(comment: DiffReviewComment, filePath: string): string {
   if (comment.side === "file" || comment.startLine == null) {
     return filePath;
   }
+  const suffix = comment.side === "original" ? " (old)" : " (new)";
   if (comment.endLine != null && comment.endLine !== comment.startLine) {
-    return `${filePath}:${comment.startLine}-${comment.endLine}`;
+    return `${filePath}:${comment.startLine}-${comment.endLine}${suffix}`;
   }
-  return `${filePath}:${comment.startLine}`;
+  return `${filePath}:${comment.startLine}${suffix}`;
 }
 
 export function composeReviewPrompt(files: DiffReviewFile[], payload: ReviewSubmitPayload): string {
