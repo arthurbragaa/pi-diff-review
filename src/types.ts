@@ -1,14 +1,25 @@
+export type ReviewScope = "git-diff" | "last-commit" | "all-files";
+
 export type ChangeStatus = "modified" | "added" | "deleted" | "renamed";
 
-export interface ReviewFile {
-  id: string;
-  status: ChangeStatus | null;
+export interface ReviewFileComparison {
+  status: ChangeStatus;
   oldPath: string | null;
   newPath: string | null;
   displayPath: string;
   hasOriginal: boolean;
   hasModified: boolean;
-  inDiff: boolean;
+}
+
+export interface ReviewFile {
+  id: string;
+  path: string;
+  worktreeStatus: ChangeStatus | null;
+  hasWorkingTreeFile: boolean;
+  inGitDiff: boolean;
+  inLastCommit: boolean;
+  gitDiff: ReviewFileComparison | null;
+  lastCommit: ReviewFileComparison | null;
 }
 
 export interface ReviewFileContents {
@@ -21,6 +32,7 @@ export type CommentSide = "original" | "modified" | "file";
 export interface DiffReviewComment {
   id: string;
   fileId: string;
+  scope: ReviewScope;
   side: CommentSide;
   startLine: number | null;
   endLine: number | null;
@@ -41,6 +53,7 @@ export interface ReviewRequestFilePayload {
   type: "request-file";
   requestId: string;
   fileId: string;
+  scope: ReviewScope;
 }
 
 export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload | ReviewRequestFilePayload;
@@ -49,6 +62,7 @@ export interface ReviewFileDataMessage {
   type: "file-data";
   requestId: string;
   fileId: string;
+  scope: ReviewScope;
   originalContent: string;
   modifiedContent: string;
 }
@@ -57,6 +71,7 @@ export interface ReviewFileErrorMessage {
   type: "file-error";
   requestId: string;
   fileId: string;
+  scope: ReviewScope;
   message: string;
 }
 

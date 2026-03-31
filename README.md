@@ -17,10 +17,10 @@ Adds a `/diff-review` command to pi.
 The command:
 
 1. opens a native review window
-2. lets you switch between `git diff` and `all files` scopes
+2. lets you switch between `git diff`, `last commit`, and `all files` scopes
 3. shows a collapsible sidebar with fuzzy file search
 4. shows git status markers in the sidebar for changed files and untracked files
-5. lazy-loads file contents on demand as you switch files
+5. lazy-loads file contents on demand as you switch files and scopes
 6. lets you draft comments on the original side, modified side, or whole file
 7. inserts the resulting feedback prompt into the pi editor when you submit
 

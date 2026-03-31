@@ -1,22 +1,37 @@
-import type { DiffReviewComment, ReviewFile, ReviewSubmitPayload } from "./types.js";
+import type { DiffReviewComment, ReviewFile, ReviewScope, ReviewSubmitPayload } from "./types.js";
+
+function formatScopeLabel(scope: ReviewScope): string {
+  switch (scope) {
+    case "git-diff": return "git diff";
+    case "last-commit": return "last commit";
+    default: return "all files";
+  }
+}
+
+function getCommentFilePath(file: ReviewFile | undefined, scope: ReviewScope): string {
+  if (file == null) return "(unknown file)";
+  const comparison = scope === "git-diff" ? file.gitDiff : scope === "last-commit" ? file.lastCommit : null;
+  return comparison?.displayPath ?? file.path;
+}
 
 function formatLocation(comment: DiffReviewComment, file: ReviewFile | undefined): string {
-  const filePath = file?.displayPath ?? comment.fileId;
+  const filePath = getCommentFilePath(file, comment.scope);
+  const scopePrefix = `[${formatScopeLabel(comment.scope)}] `;
+
   if (comment.side === "file" || comment.startLine == null) {
-    return filePath;
+    return `${scopePrefix}${filePath}`;
   }
 
-  const needsDiffSuffix = file?.status != null;
   const range = comment.endLine != null && comment.endLine !== comment.startLine
     ? `${comment.startLine}-${comment.endLine}`
     : `${comment.startLine}`;
 
-  if (!needsDiffSuffix) {
-    return `${filePath}:${range}`;
+  if (comment.scope === "all-files") {
+    return `${scopePrefix}${filePath}:${range}`;
   }
 
   const suffix = comment.side === "original" ? " (old)" : " (new)";
-  return `${filePath}:${range}${suffix}`;
+  return `${scopePrefix}${filePath}:${range}${suffix}`;
 }
 
 export function composeReviewPrompt(files: ReviewFile[], payload: ReviewSubmitPayload): string {

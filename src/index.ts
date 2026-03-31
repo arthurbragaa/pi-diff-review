@@ -141,12 +141,13 @@ export default function (pi: ExtensionAPI) {
       window.send(`window.__reviewReceive(${payload});`);
     };
 
-    const loadContents = (file: ReviewFile): Promise<ReviewFileContents> => {
-      const cached = contentCache.get(file.id);
+    const loadContents = (file: ReviewFile, scope: ReviewRequestFilePayload["scope"]): Promise<ReviewFileContents> => {
+      const cacheKey = `${scope}:${file.id}`;
+      const cached = contentCache.get(cacheKey);
       if (cached != null) return cached;
 
-      const pending = loadReviewFileContents(pi, repoRoot, file);
-      contentCache.set(file.id, pending);
+      const pending = loadReviewFileContents(pi, repoRoot, file, scope);
+      contentCache.set(cacheKey, pending);
       return pending;
     };
 
@@ -179,17 +180,19 @@ export default function (pi: ExtensionAPI) {
               type: "file-error",
               requestId: message.requestId,
               fileId: message.fileId,
+              scope: message.scope,
               message: "Unknown file requested.",
             });
             return;
           }
 
           try {
-            const contents = await loadContents(file);
+            const contents = await loadContents(file, message.scope);
             sendWindowMessage({
               type: "file-data",
               requestId: message.requestId,
               fileId: message.fileId,
+              scope: message.scope,
               originalContent: contents.originalContent,
               modifiedContent: contents.modifiedContent,
             });
@@ -199,6 +202,7 @@ export default function (pi: ExtensionAPI) {
               type: "file-error",
               requestId: message.requestId,
               fileId: message.fileId,
+              scope: message.scope,
               message: messageText,
             });
           }
@@ -266,7 +270,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand("diff-review", {
-    description: "Open a native review window with git diff and all files scopes",
+    description: "Open a native review window with git diff, last commit, and all files scopes",
     handler: async (_args, ctx) => {
       await reviewRepository(ctx);
     },
