@@ -21,9 +21,10 @@ The command:
 3. shows a collapsible sidebar with fuzzy file search
 4. shows git status markers in the sidebar for changed files and untracked files
 5. keeps your reviewed markers between review sessions when a file's diff fingerprint has not changed
-6. lazy-loads file contents on demand as you switch files and scopes
-7. lets you draft comments on the original side, modified side, or whole file
-8. inserts the resulting feedback prompt into the pi editor when you submit
+6. lets you hide already reviewed files from the sidebar
+7. lazy-loads file contents on demand as you switch files and scopes
+8. lets you draft comments on the original side, modified side, or whole file
+9. inserts the resulting feedback prompt into the pi editor when you submit
 
 ## Requirements
 

@@ -15,6 +15,7 @@ const state = {
   comments: [],
   overallComment: "",
   hideUnchanged: false,
+  hideReviewed: false,
   wrapLines: true,
   collapsedDirs: {},
   reviewedFiles: buildInitialReviewedFiles(),
@@ -44,6 +45,7 @@ const cancelButton = document.getElementById("cancel-button");
 const overallCommentButton = document.getElementById("overall-comment-button");
 const fileCommentButton = document.getElementById("file-comment-button");
 const toggleReviewedButton = document.getElementById("toggle-reviewed-button");
+const toggleHideReviewedButton = document.getElementById("toggle-hide-reviewed-button");
 const toggleUnchangedButton = document.getElementById("toggle-unchanged-button");
 const toggleWrapButton = document.getElementById("toggle-wrap-button");
 
@@ -129,16 +131,22 @@ function getScopedFiles() {
   return reviewData.files.filter((file) => file.inGitDiff);
 }
 
-function ensureActiveFileForScope() {
+function getVisibleScopedFiles() {
   const scopedFiles = getScopedFiles();
-  if (scopedFiles.length === 0) {
+  if (!state.hideReviewed) return scopedFiles;
+  return scopedFiles.filter((file) => !isFileReviewed(file.id));
+}
+
+function ensureActiveFileForScope() {
+  const visibleScopedFiles = getVisibleScopedFiles();
+  if (visibleScopedFiles.length === 0) {
     state.activeFileId = null;
     return;
   }
-  if (scopedFiles.some((file) => file.id === state.activeFileId)) {
+  if (visibleScopedFiles.some((file) => file.id === state.activeFileId)) {
     return;
   }
-  state.activeFileId = scopedFiles[0].id;
+  state.activeFileId = visibleScopedFiles[0].id;
 }
 
 function activeFile() {
@@ -238,11 +246,11 @@ function getFileSearchScore(query, file) {
 }
 
 function getFilteredFiles() {
-  const scopedFiles = getScopedFiles();
+  const visibleScopedFiles = getVisibleScopedFiles();
   const query = state.fileFilter.trim();
-  if (!query) return [...scopedFiles];
+  if (!query) return [...visibleScopedFiles];
 
-  return scopedFiles
+  return visibleScopedFiles
     .map((file) => ({ file, score: getFileSearchScore(query, file) }))
     .filter((entry) => entry.score >= 0)
     .sort((a, b) => {
@@ -483,6 +491,10 @@ function updateToggleButtons() {
     ? "cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-3 py-1 text-xs font-medium text-[#3fb950] hover:bg-[#238636]/25"
     : "cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1 text-xs font-medium text-review-text hover:bg-[#21262d]";
   toggleWrapButton.textContent = `Wrap lines: ${state.wrapLines ? "on" : "off"}`;
+  toggleHideReviewedButton.textContent = `Hide reviewed: ${state.hideReviewed ? "on" : "off"}`;
+  toggleHideReviewedButton.className = state.hideReviewed
+    ? "cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-2.5 py-1 text-[11px] font-medium text-[#3fb950] hover:bg-[#238636]/25"
+    : "cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]";
   toggleUnchangedButton.textContent = state.hideUnchanged ? "Show full file" : "Show changed areas only";
   toggleUnchangedButton.style.display = activeFileShowsDiff() ? "inline-flex" : "none";
   updateScopeButtons();
@@ -510,12 +522,15 @@ function renderTree() {
   ensureActiveFileForScope();
   fileTreeEl.innerHTML = "";
   const scopedFiles = getScopedFiles();
+  const visibleScopedFiles = getVisibleScopedFiles();
   const visibleFiles = getFilteredFiles();
 
   if (visibleFiles.length === 0) {
     const message = state.fileFilter.trim()
       ? `No files match <span class="text-review-text">${escapeHtml(state.fileFilter.trim())}</span>.`
-      : `No files in <span class="text-review-text">${escapeHtml(scopeLabel(state.currentScope).toLowerCase())}</span>.`;
+      : state.hideReviewed && scopedFiles.length > 0 && visibleScopedFiles.length === 0
+        ? "All files are currently marked as reviewed."
+        : `No files in <span class="text-review-text">${escapeHtml(scopeLabel(state.currentScope).toLowerCase())}</span>.`;
     fileTreeEl.innerHTML = `
       <div class="px-3 py-4 text-sm text-review-muted">
         ${message}
@@ -529,8 +544,10 @@ function renderTree() {
 
   sidebarTitleEl.textContent = scopeLabel(state.currentScope);
   const comments = state.comments.length;
-  const filteredSuffix = state.fileFilter.trim() ? ` • ${visibleFiles.length} shown` : "";
-  summaryEl.textContent = `${scopedFiles.length} file(s) • ${comments} comment(s)${state.overallComment ? " • overall note" : ""}${filteredSuffix}`;
+  const hiddenReviewedCount = scopedFiles.length - visibleScopedFiles.length;
+  const filteredSuffix = state.fileFilter.trim() || state.hideReviewed ? ` • ${visibleFiles.length} shown` : "";
+  const hiddenReviewedSuffix = state.hideReviewed && hiddenReviewedCount > 0 ? ` • ${hiddenReviewedCount} reviewed hidden` : "";
+  summaryEl.textContent = `${scopedFiles.length} file(s) • ${comments} comment(s)${state.overallComment ? " • overall note" : ""}${hiddenReviewedSuffix}${filteredSuffix}`;
   updateToggleButtons();
   updateSidebarLayout();
 }
@@ -1044,7 +1061,13 @@ toggleReviewedButton.addEventListener("click", () => {
     window.glimpse.send({ type: "set-reviewed", fileId: file.id, reviewed });
   }
 
-  renderTree();
+  renderAll({ restoreFileScroll: true });
+});
+
+toggleHideReviewedButton.addEventListener("click", () => {
+  saveCurrentScrollPosition();
+  state.hideReviewed = !state.hideReviewed;
+  renderAll({ restoreFileScroll: true });
 });
 
 toggleSidebarButton.addEventListener("click", () => {
