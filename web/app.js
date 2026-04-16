@@ -1,5 +1,14 @@
 const reviewData = JSON.parse(document.getElementById("diff-review-data").textContent || "{}");
 
+function buildInitialReviewedFiles() {
+  const reviewedFiles = {};
+  const fileIds = Array.isArray(reviewData.initialReviewedFileIds) ? reviewData.initialReviewedFileIds : [];
+  fileIds.forEach((fileId) => {
+    reviewedFiles[fileId] = true;
+  });
+  return reviewedFiles;
+}
+
 const state = {
   activeFileId: null,
   currentScope: "git-diff",
@@ -8,7 +17,7 @@ const state = {
   hideUnchanged: false,
   wrapLines: true,
   collapsedDirs: {},
-  reviewedFiles: {},
+  reviewedFiles: buildInitialReviewedFiles(),
   scrollPositions: {},
   sidebarCollapsed: false,
   fileFilter: "",
@@ -1026,7 +1035,15 @@ toggleWrapButton.addEventListener("click", () => {
 toggleReviewedButton.addEventListener("click", () => {
   const file = activeFile();
   if (!file) return;
-  state.reviewedFiles[file.id] = !isFileReviewed(file.id);
+
+  const reviewed = !isFileReviewed(file.id);
+  if (reviewed) state.reviewedFiles[file.id] = true;
+  else delete state.reviewedFiles[file.id];
+
+  if (window.glimpse?.send) {
+    window.glimpse.send({ type: "set-reviewed", fileId: file.id, reviewed });
+  }
+
   renderTree();
 });
 

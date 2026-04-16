@@ -14,6 +14,7 @@ export interface ReviewFileComparison {
 export interface ReviewFile {
   id: string;
   path: string;
+  reviewFingerprint: string | null;
   worktreeStatus: ChangeStatus | null;
   hasWorkingTreeFile: boolean;
   inGitDiff: boolean;
@@ -56,7 +57,13 @@ export interface ReviewRequestFilePayload {
   scope: ReviewScope;
 }
 
-export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload | ReviewRequestFilePayload;
+export interface ReviewSetReviewedPayload {
+  type: "set-reviewed";
+  fileId: string;
+  reviewed: boolean;
+}
+
+export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload | ReviewRequestFilePayload | ReviewSetReviewedPayload;
 
 export interface ReviewFileDataMessage {
   type: "file-data";
@@ -81,4 +88,5 @@ export interface ReviewWindowData {
   repoRoot: string;
   files: ReviewFile[];
   baseRef: string;
+  initialReviewedFileIds: string[];
 }

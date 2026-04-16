@@ -1,18 +1,20 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
 import { open, type GlimpseWindow } from "glimpseui";
-import { DEFAULT_BASE_REF, getReviewWindowData, loadReviewFileContents } from "./git.js";
-import { composeReviewPrompt } from "./prompt.js";
+import { DEFAULT_BASE_REF, getReviewWindowData, loadReviewFileContents } from './git.js'
+import { composeReviewPrompt } from './prompt.js'
+import { loadReviewedFingerprints, updateReviewedFingerprint } from './review-state.js'
 import type {
   ReviewCancelPayload,
   ReviewFile,
   ReviewFileContents,
   ReviewHostMessage,
   ReviewRequestFilePayload,
+  ReviewSetReviewedPayload,
   ReviewSubmitPayload,
   ReviewWindowMessage,
-} from "./types.js";
-import { buildReviewHtml } from "./ui.js";
+} from './types.js'
+import { buildReviewHtml } from './ui.js'
 
 function isSubmitPayload(value: ReviewWindowMessage): value is ReviewSubmitPayload {
   return value.type === "submit";
@@ -23,7 +25,11 @@ function isCancelPayload(value: ReviewWindowMessage): value is ReviewCancelPaylo
 }
 
 function isRequestFilePayload(value: ReviewWindowMessage): value is ReviewRequestFilePayload {
-  return value.type === "request-file";
+  return value.type === 'request-file'
+}
+
+function isSetReviewedPayload(value: ReviewWindowMessage): value is ReviewSetReviewedPayload {
+  return value.type === 'set-reviewed'
 }
 
 type WaitingEditorResult = "escape" | "window-settled";
@@ -117,13 +123,18 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const { repoRoot, files } = await getReviewWindowData(pi, ctx.cwd);
+    const { repoRoot, files } = await getReviewWindowData(pi, ctx.cwd)
     if (files.length === 0) {
-      ctx.ui.notify(`No branch changes found against ${DEFAULT_BASE_REF}.`, "info");
-      return;
+      ctx.ui.notify(`No branch changes found against ${DEFAULT_BASE_REF}.`, 'info')
+      return
     }
 
-    const html = buildReviewHtml({ repoRoot, files, baseRef: DEFAULT_BASE_REF });
+    const reviewedFingerprints = await loadReviewedFingerprints(repoRoot)
+    const initialReviewedFileIds = files
+      .filter((file) => file.reviewFingerprint != null && reviewedFingerprints.has(file.reviewFingerprint))
+      .map((file) => file.id)
+
+    const html = buildReviewHtml({ repoRoot, files, baseRef: DEFAULT_BASE_REF, initialReviewedFileIds })
     const window = open(html, {
       width: 1680,
       height: 1020,
@@ -131,15 +142,29 @@ export default function (pi: ExtensionAPI) {
     });
     activeWindow = window;
 
-    const waitingUI = showWaitingUI(ctx);
-    const fileMap = new Map(files.map((file) => [file.id, file]));
-    const contentCache = new Map<string, Promise<ReviewFileContents>>();
+    const waitingUI = showWaitingUI(ctx)
+    const fileMap = new Map(files.map((file) => [file.id, file]))
+    const contentCache = new Map<string, Promise<ReviewFileContents>>()
+    let reviewedStateWrite = Promise.resolve()
 
     const sendWindowMessage = (message: ReviewHostMessage): void => {
-      if (activeWindow !== window) return;
-      const payload = escapeForInlineScript(JSON.stringify(message));
-      window.send(`window.__reviewReceive(${payload});`);
-    };
+      if (activeWindow !== window) return
+      const payload = escapeForInlineScript(JSON.stringify(message))
+      window.send(`window.__reviewReceive(${payload});`)
+    }
+
+    const queueReviewedStateWrite = (message: ReviewSetReviewedPayload): void => {
+      const file = fileMap.get(message.fileId)
+      const fingerprint = file?.reviewFingerprint
+      if (fingerprint == null) return
+
+      reviewedStateWrite = reviewedStateWrite
+        .then(() => updateReviewedFingerprint(repoRoot, fingerprint, message.reviewed))
+        .catch((error) => {
+          const messageText = error instanceof Error ? error.message : String(error)
+          ctx.ui.notify(`Failed to save reviewed state: ${messageText}`, 'warning')
+        })
+    }
 
     const loadContents = (file: ReviewFile, scope: ReviewRequestFilePayload["scope"]): Promise<ReviewFileContents> => {
       const cacheKey = `${scope}:${file.id}`;
@@ -211,11 +236,15 @@ export default function (pi: ExtensionAPI) {
         const onMessage = (data: unknown): void => {
           const message = data as ReviewWindowMessage;
           if (isRequestFilePayload(message)) {
-            void handleRequestFile(message);
-            return;
+            void handleRequestFile(message)
+            return
+          }
+          if (isSetReviewedPayload(message)) {
+            queueReviewedStateWrite(message)
+            return
           }
           if (isSubmitPayload(message) || isCancelPayload(message)) {
-            settle(message);
+            settle(message)
           }
         };
 
@@ -241,26 +270,28 @@ export default function (pi: ExtensionAPI) {
       ]);
 
       if (result.type === "ui" && result.reason === "escape") {
-        closeActiveWindow();
-        await terminalMessagePromise.catch(() => null);
-        ctx.ui.notify("Review cancelled.", "info");
-        return;
+        closeActiveWindow()
+        await terminalMessagePromise.catch(() => null)
+        await reviewedStateWrite
+        ctx.ui.notify('Review cancelled.', 'info')
+        return
       }
 
       const message = result.type === "window" ? result.message : await terminalMessagePromise;
 
-      waitingUI.dismiss();
-      await waitingUI.promise;
-      closeActiveWindow();
+      waitingUI.dismiss()
+      await waitingUI.promise
+      closeActiveWindow()
+      await reviewedStateWrite
 
-      if (message == null || message.type === "cancel") {
-        ctx.ui.notify("Review cancelled.", "info");
-        return;
+      if (message == null || message.type === 'cancel') {
+        ctx.ui.notify('Review cancelled.', 'info')
+        return
       }
 
-      const prompt = composeReviewPrompt(files, message, DEFAULT_BASE_REF);
-      ctx.ui.setEditorText(prompt);
-      ctx.ui.notify("Inserted review feedback into the editor.", "info");
+      const prompt = composeReviewPrompt(files, message, DEFAULT_BASE_REF)
+      ctx.ui.setEditorText(prompt)
+      ctx.ui.notify('Inserted review feedback into the editor.', 'info')
     } catch (error) {
       activeWaitingUIDismiss?.();
       closeActiveWindow();

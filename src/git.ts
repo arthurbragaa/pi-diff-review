@@ -1,7 +1,8 @@
-import { readFile } from "node:fs/promises";
-import { extname, join } from "node:path";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import type { ChangeStatus, ReviewFile, ReviewFileComparison, ReviewFileContents, ReviewScope } from "./types.js";
+import { createHash } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
+import { extname, join } from 'node:path'
+import type { ExtensionAPI } from '@mariozechner/pi-coding-agent'
+import type { ChangeStatus, ReviewFile, ReviewFileComparison, ReviewFileContents, ReviewScope } from './types.js'
 
 export const DEFAULT_BASE_REF = "origin/main";
 
@@ -13,6 +14,7 @@ interface ChangedPath {
 
 interface ReviewFileSeed {
   path: string;
+  reviewFingerprint: string | null;
   worktreeStatus: ChangeStatus | null;
   hasWorkingTreeFile: boolean;
   inGitDiff: boolean;
@@ -168,21 +170,48 @@ function createReviewFile(seed: ReviewFileSeed): ReviewFile {
   return {
     id: buildReviewFileId(seed.path, seed.hasWorkingTreeFile, seed.gitDiff, seed.lastCommit),
     path: seed.path,
+    reviewFingerprint: seed.reviewFingerprint,
     worktreeStatus: seed.worktreeStatus,
     hasWorkingTreeFile: seed.hasWorkingTreeFile,
     inGitDiff: seed.inGitDiff,
     inLastCommit: seed.inLastCommit,
     gitDiff: seed.gitDiff,
     lastCommit: seed.lastCommit,
-  };
+  }
 }
 
 async function getRevisionContent(pi: ExtensionAPI, repoRoot: string, revision: string, path: string): Promise<string> {
-  const result = await pi.exec("git", ["show", `${revision}:${path}`], { cwd: repoRoot });
+  const result = await pi.exec('git', ['show', `${revision}:${path}`], { cwd: repoRoot })
   if (result.code !== 0) {
-    return "";
+    return ''
   }
-  return result.stdout;
+  return result.stdout
+}
+
+async function getRevisionBlobId(pi: ExtensionAPI, repoRoot: string, revision: string, path: string): Promise<string> {
+  const result = await pi.exec('git', ['rev-parse', `${revision}:${path}`], { cwd: repoRoot })
+  if (result.code !== 0) {
+    return ''
+  }
+  return result.stdout.trim()
+}
+
+async function buildGitDiffFingerprint(pi: ExtensionAPI, repoRoot: string, mergeBase: string, change: ChangedPath): Promise<string> {
+  const originalBlobId = change.oldPath == null ? '' : await getRevisionBlobId(pi, repoRoot, mergeBase, change.oldPath)
+  const modifiedBlobId = change.newPath == null ? '' : await getRevisionBlobId(pi, repoRoot, 'HEAD', change.newPath)
+
+  return createHash('sha1')
+    .update([
+      'git-diff',
+      DEFAULT_BASE_REF,
+      mergeBase,
+      change.status,
+      change.oldPath ?? '',
+      change.newPath ?? '',
+      originalBlobId,
+      modifiedBlobId,
+    ].join('\u0000'))
+    .digest('hex')
 }
 
 async function getWorkingTreeContent(repoRoot: string, path: string): Promise<string> {
@@ -283,30 +312,40 @@ export async function getReviewWindowData(pi: ExtensionAPI, cwd: string): Promis
   for (const path of currentPaths) {
     seeds.set(path, {
       path,
+      reviewFingerprint: null,
       worktreeStatus: null,
       hasWorkingTreeFile: true,
       inGitDiff: false,
       inLastCommit: false,
       gitDiff: null,
       lastCommit: null,
-    });
+    })
   }
 
-  for (const change of branchChanges) {
-    const key = change.newPath ?? change.oldPath ?? toDisplayPath(change);
+  const branchChangesWithFingerprints = await Promise.all(
+    branchChanges.map(async (change) => ({
+      change,
+      reviewFingerprint: await buildGitDiffFingerprint(pi, repoRoot, mergeBase, change),
+    })),
+  )
+
+  for (const { change, reviewFingerprint } of branchChangesWithFingerprints) {
+    const key = change.newPath ?? change.oldPath ?? toDisplayPath(change)
     const seed = upsertSeed(seeds, key, () => ({
       path: key,
+      reviewFingerprint: null,
       worktreeStatus: null,
       hasWorkingTreeFile: change.newPath != null,
       inGitDiff: false,
       inLastCommit: false,
       gitDiff: null,
       lastCommit: null,
-    }));
-    seed.worktreeStatus = change.status;
-    seed.hasWorkingTreeFile = change.newPath != null;
-    seed.inGitDiff = true;
-    seed.gitDiff = toComparison(change);
+    }))
+    seed.reviewFingerprint = reviewFingerprint
+    seed.worktreeStatus = change.status
+    seed.hasWorkingTreeFile = change.newPath != null
+    seed.inGitDiff = true
+    seed.gitDiff = toComparison(change)
   }
 
   const files = [...seeds.values()]
