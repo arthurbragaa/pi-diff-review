@@ -2,11 +2,7 @@ const reviewData = JSON.parse(document.getElementById("diff-review-data").textCo
 
 const state = {
   activeFileId: null,
-  currentScope: reviewData.files.some((file) => file.inGitDiff)
-    ? "git-diff"
-    : reviewData.files.some((file) => file.inLastCommit)
-      ? "last-commit"
-      : "all-files",
+  currentScope: "git-diff",
   comments: [],
   overallComment: "",
   hideUnchanged: false,
@@ -25,10 +21,8 @@ const sidebarEl = document.getElementById("sidebar");
 const sidebarTitleEl = document.getElementById("sidebar-title");
 const sidebarSearchInputEl = document.getElementById("sidebar-search-input");
 const toggleSidebarButton = document.getElementById("toggle-sidebar-button");
-const scopeDiffButton = document.getElementById("scope-diff-button");
-const scopeLastCommitButton = document.getElementById("scope-last-commit-button");
-const scopeAllButton = document.getElementById("scope-all-button");
 const windowTitleEl = document.getElementById("window-title");
+const baseRefBadgeEl = document.getElementById("base-ref-badge");
 const repoRootEl = document.getElementById("repo-root");
 const fileTreeEl = document.getElementById("file-tree");
 const summaryEl = document.getElementById("summary");
@@ -46,6 +40,7 @@ const toggleWrapButton = document.getElementById("toggle-wrap-button");
 
 repoRootEl.textContent = reviewData.repoRoot || "";
 windowTitleEl.textContent = "Review";
+baseRefBadgeEl.textContent = reviewData.baseRef ? `vs ${reviewData.baseRef}` : "";
 
 let monacoApi = null;
 let diffEditor = null;
@@ -86,7 +81,7 @@ function inferLanguage(path) {
 
 function scopeLabel(scope) {
   switch (scope) {
-    case "git-diff": return "Git diff";
+    case "git-diff": return "Branch diff";
     case "last-commit": return "Last commit";
     default: return "All files";
   }
@@ -95,7 +90,7 @@ function scopeLabel(scope) {
 function scopeHint(scope) {
   switch (scope) {
     case "git-diff":
-      return "Review working tree changes against HEAD. Hover or click line numbers in the gutter to add an inline comment.";
+      return `Review branch changes from merge-base(${reviewData.baseRef || "origin/main"}, HEAD) to HEAD. Hover or click line numbers in the gutter to add an inline comment.`;
     case "last-commit":
       return "Review the last commit against its parent. Hover or click line numbers in the gutter to add an inline comment.";
     default:
@@ -122,14 +117,7 @@ function isFileReviewed(fileId) {
 }
 
 function getScopedFiles() {
-  switch (state.currentScope) {
-    case "git-diff":
-      return reviewData.files.filter((file) => file.inGitDiff);
-    case "last-commit":
-      return reviewData.files.filter((file) => file.inLastCommit);
-    default:
-      return reviewData.files.filter((file) => file.hasWorkingTreeFile);
-  }
+  return reviewData.files.filter((file) => file.inGitDiff);
 }
 
 function ensureActiveFileForScope() {
@@ -476,28 +464,6 @@ function updateSidebarLayout() {
 }
 
 function updateScopeButtons() {
-  const counts = {
-    diff: reviewData.files.filter((file) => file.inGitDiff).length,
-    lastCommit: reviewData.files.filter((file) => file.inLastCommit).length,
-    all: reviewData.files.filter((file) => file.hasWorkingTreeFile).length,
-  };
-
-  const applyButtonClasses = (button, active, disabled) => {
-    button.disabled = disabled;
-    button.className = disabled
-      ? "cursor-default rounded-md border border-review-border bg-[#11161d] px-2.5 py-1 text-[11px] font-medium text-review-muted opacity-60"
-      : active
-        ? "cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-2.5 py-1 text-[11px] font-medium text-[#3fb950] hover:bg-[#238636]/25"
-        : "cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]";
-  };
-
-  scopeDiffButton.textContent = `Git diff${counts.diff > 0 ? ` (${counts.diff})` : ""}`;
-  scopeLastCommitButton.textContent = `Last commit${counts.lastCommit > 0 ? ` (${counts.lastCommit})` : ""}`;
-  scopeAllButton.textContent = `All files${counts.all > 0 ? ` (${counts.all})` : ""}`;
-
-  applyButtonClasses(scopeDiffButton, state.currentScope === "git-diff", counts.diff === 0);
-  applyButtonClasses(scopeLastCommitButton, state.currentScope === "last-commit", counts.lastCommit === 0);
-  applyButtonClasses(scopeAllButton, state.currentScope === "all-files", counts.all === 0);
 }
 
 function updateToggleButtons() {
@@ -1006,12 +972,7 @@ function setupMonaco() {
 }
 
 function switchScope(scope) {
-  const hasScopeFiles = {
-    "git-diff": reviewData.files.some((file) => file.inGitDiff),
-    "last-commit": reviewData.files.some((file) => file.inLastCommit),
-    "all-files": reviewData.files.some((file) => file.hasWorkingTreeFile),
-  };
-  if (!hasScopeFiles[scope] || state.currentScope === scope) return;
+  if (scope !== "git-diff" || state.currentScope === scope) return;
   saveCurrentScrollPosition();
   state.currentScope = scope;
   renderAll({ restoreFileScroll: true });
@@ -1067,18 +1028,6 @@ toggleReviewedButton.addEventListener("click", () => {
   if (!file) return;
   state.reviewedFiles[file.id] = !isFileReviewed(file.id);
   renderTree();
-});
-
-scopeDiffButton.addEventListener("click", () => {
-  switchScope("git-diff");
-});
-
-scopeLastCommitButton.addEventListener("click", () => {
-  switchScope("last-commit");
-});
-
-scopeAllButton.addEventListener("click", () => {
-  switchScope("all-files");
 });
 
 toggleSidebarButton.addEventListener("click", () => {

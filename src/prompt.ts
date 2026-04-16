@@ -1,8 +1,8 @@
 import type { DiffReviewComment, ReviewFile, ReviewScope, ReviewSubmitPayload } from "./types.js";
 
-function formatScopeLabel(scope: ReviewScope): string {
+function formatScopeLabel(scope: ReviewScope, baseRef: string): string {
   switch (scope) {
-    case "git-diff": return "git diff";
+    case "git-diff": return `branch diff vs ${baseRef}`;
     case "last-commit": return "last commit";
     default: return "all files";
   }
@@ -14,9 +14,9 @@ function getCommentFilePath(file: ReviewFile | undefined, scope: ReviewScope): s
   return comparison?.displayPath ?? file.path;
 }
 
-function formatLocation(comment: DiffReviewComment, file: ReviewFile | undefined): string {
+function formatLocation(comment: DiffReviewComment, file: ReviewFile | undefined, baseRef: string): string {
   const filePath = getCommentFilePath(file, comment.scope);
-  const scopePrefix = `[${formatScopeLabel(comment.scope)}] `;
+  const scopePrefix = `[${formatScopeLabel(comment.scope, baseRef)}] `;
 
   if (comment.side === "file" || comment.startLine == null) {
     return `${scopePrefix}${filePath}`;
@@ -34,11 +34,13 @@ function formatLocation(comment: DiffReviewComment, file: ReviewFile | undefined
   return `${scopePrefix}${filePath}:${range}${suffix}`;
 }
 
-export function composeReviewPrompt(files: ReviewFile[], payload: ReviewSubmitPayload): string {
+export function composeReviewPrompt(files: ReviewFile[], payload: ReviewSubmitPayload, baseRef: string): string {
   const fileMap = new Map(files.map((file) => [file.id, file]));
   const lines: string[] = [];
 
   lines.push("Please address the following feedback");
+  lines.push("");
+  lines.push(`Comparison base: ${baseRef}`);
   lines.push("");
 
   const overallComment = payload.overallComment.trim();
@@ -49,7 +51,7 @@ export function composeReviewPrompt(files: ReviewFile[], payload: ReviewSubmitPa
 
   payload.comments.forEach((comment, index) => {
     const file = fileMap.get(comment.fileId);
-    lines.push(`${index + 1}. ${formatLocation(comment, file)}`);
+    lines.push(`${index + 1}. ${formatLocation(comment, file, baseRef)}`);
     lines.push(`   ${comment.body.trim()}`);
     lines.push("");
   });

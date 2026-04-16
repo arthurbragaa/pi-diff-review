@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
 import { open, type GlimpseWindow } from "glimpseui";
-import { getReviewWindowData, loadReviewFileContents } from "./git.js";
+import { DEFAULT_BASE_REF, getReviewWindowData, loadReviewFileContents } from "./git.js";
 import { composeReviewPrompt } from "./prompt.js";
 import type {
   ReviewCancelPayload,
@@ -119,15 +119,15 @@ export default function (pi: ExtensionAPI) {
 
     const { repoRoot, files } = await getReviewWindowData(pi, ctx.cwd);
     if (files.length === 0) {
-      ctx.ui.notify("No reviewable files found.", "info");
+      ctx.ui.notify(`No branch changes found against ${DEFAULT_BASE_REF}.`, "info");
       return;
     }
 
-    const html = buildReviewHtml({ repoRoot, files });
+    const html = buildReviewHtml({ repoRoot, files, baseRef: DEFAULT_BASE_REF });
     const window = open(html, {
       width: 1680,
       height: 1020,
-      title: "pi review",
+      title: `pi review • ${DEFAULT_BASE_REF}`,
     });
     activeWindow = window;
 
@@ -151,7 +151,7 @@ export default function (pi: ExtensionAPI) {
       return pending;
     };
 
-    ctx.ui.notify("Opened native review window.", "info");
+    ctx.ui.notify(`Opened native review window against ${DEFAULT_BASE_REF}.`, "info");
 
     try {
       const terminalMessagePromise = new Promise<ReviewSubmitPayload | ReviewCancelPayload | null>((resolve, reject) => {
@@ -258,7 +258,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const prompt = composeReviewPrompt(files, message);
+      const prompt = composeReviewPrompt(files, message, DEFAULT_BASE_REF);
       ctx.ui.setEditorText(prompt);
       ctx.ui.notify("Inserted review feedback into the editor.", "info");
     } catch (error) {
@@ -270,7 +270,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand("diff-review", {
-    description: "Open a native review window with git diff, last commit, and all files scopes",
+    description: "Open a native review window for branch changes against origin/main",
     handler: async (_args, ctx) => {
       await reviewRepository(ctx);
     },

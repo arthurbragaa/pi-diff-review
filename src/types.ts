@@ -80,4 +80,5 @@ export type ReviewHostMessage = ReviewFileDataMessage | ReviewFileErrorMessage;
 export interface ReviewWindowData {
   repoRoot: string;
   files: ReviewFile[];
+  baseRef: string;
 }
