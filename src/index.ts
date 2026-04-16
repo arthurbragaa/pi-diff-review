@@ -289,7 +289,12 @@ export default function (pi: ExtensionAPI) {
         return
       }
 
-      const prompt = composeReviewPrompt(files, message, DEFAULT_BASE_REF)
+      const prompt = composeReviewPrompt(files, message)
+      if (prompt.length === 0) {
+        ctx.ui.notify('No review feedback to insert.', 'info')
+        return
+      }
+
       ctx.ui.setEditorText(prompt)
       ctx.ui.notify('Inserted review feedback into the editor.', 'info')
     } catch (error) {
