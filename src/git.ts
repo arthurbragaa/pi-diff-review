@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -117,6 +118,18 @@ function parseTrackedPaths(output: string): string[] {
     .filter((line) => line.length > 0);
 }
 
+function parseTrackedFileBlobIdentities(output: string): Map<string, string> {
+  const identities = new Map<string, string>();
+
+  for (const line of output.split(/\r?\n/)) {
+    const match = /^(?:\d+)\s+([0-9a-f]+)\s+\d+\t(.+)$/.exec(line.trim());
+    if (match == null) continue;
+    identities.set(match[2], `git:${match[1]}`);
+  }
+
+  return identities;
+}
+
 function mergeChangedPaths(tracked: ChangedPath[], untracked: ChangedPath[]): ChangedPath[] {
   const seen = new Set(tracked.map((change) => `${change.status}:${change.oldPath ?? ""}:${change.newPath ?? ""}`));
   const merged = [...tracked];
@@ -166,6 +179,7 @@ function createReviewFile(seed: ReviewFileSeed): ReviewFile {
   return {
     id: buildReviewFileId(seed.path, seed.hasWorkingTreeFile, seed.gitDiff, seed.lastCommit),
     path: seed.path,
+    reviewFingerprint: "",
     worktreeStatus: seed.worktreeStatus,
     hasWorkingTreeFile: seed.hasWorkingTreeFile,
     inGitDiff: seed.inGitDiff,
@@ -173,6 +187,70 @@ function createReviewFile(seed: ReviewFileSeed): ReviewFile {
     gitDiff: seed.gitDiff,
     lastCommit: seed.lastCommit,
   };
+}
+
+function hashText(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+async function getRevisionBlobIdentity(pi: ExtensionAPI, repoRoot: string, revision: string, path: string): Promise<string> {
+  const result = await pi.exec("git", ["rev-parse", `${revision}:${path}`], { cwd: repoRoot });
+  if (result.code !== 0) return "missing";
+  return `git:${result.stdout.trim()}`;
+}
+
+async function getWorkingTreeContentIdentity(repoRoot: string, path: string): Promise<string> {
+  try {
+    const content = await readFile(join(repoRoot, path));
+    return `sha256:${createHash("sha256").update(content).digest("hex")}`;
+  } catch {
+    return "missing";
+  }
+}
+
+async function buildComparisonFingerprintParts(pi: ExtensionAPI, repoRoot: string, scope: ReviewScope, comparison: ReviewFileComparison): Promise<Record<string, string>> {
+  const originalRevision = scope === "git-diff" ? "HEAD" : "HEAD^";
+  const modifiedRevision = scope === "git-diff" ? null : "HEAD";
+
+  const original = comparison.oldPath == null
+    ? "none"
+    : await getRevisionBlobIdentity(pi, repoRoot, originalRevision, comparison.oldPath);
+  const modified = comparison.newPath == null
+    ? "none"
+    : modifiedRevision == null
+      ? await getWorkingTreeContentIdentity(repoRoot, comparison.newPath)
+      : await getRevisionBlobIdentity(pi, repoRoot, modifiedRevision, comparison.newPath);
+
+  return {
+    status: comparison.status,
+    oldPath: comparison.oldPath ?? "",
+    newPath: comparison.newPath ?? "",
+    original,
+    modified,
+  };
+}
+
+async function buildReviewFingerprint(pi: ExtensionAPI, repoRoot: string, file: ReviewFile, workingTreeIdentityByPath: Map<string, string>): Promise<string> {
+  const parts: Record<string, unknown> = {
+    version: 1,
+    path: file.path,
+    worktreeStatus: file.worktreeStatus,
+    hasWorkingTreeFile: file.hasWorkingTreeFile,
+    workingTree: file.hasWorkingTreeFile
+      ? workingTreeIdentityByPath.get(file.path) ?? await getWorkingTreeContentIdentity(repoRoot, file.path)
+      : "none",
+    inGitDiff: file.inGitDiff,
+    inLastCommit: file.inLastCommit,
+  };
+
+  if (file.gitDiff != null) {
+    parts.gitDiff = await buildComparisonFingerprintParts(pi, repoRoot, "git-diff", file.gitDiff);
+  }
+  if (file.lastCommit != null) {
+    parts.lastCommit = await buildComparisonFingerprintParts(pi, repoRoot, "last-commit", file.lastCommit);
+  }
+
+  return hashText(JSON.stringify(parts));
 }
 
 async function getRevisionContent(pi: ExtensionAPI, repoRoot: string, revision: string, path: string): Promise<string> {
@@ -265,12 +343,14 @@ export async function getReviewWindowData(pi: ExtensionAPI, cwd: string): Promis
     : "";
   const untrackedOutput = await runGitAllowFailure(pi, repoRoot, ["ls-files", "--others", "--exclude-standard"]);
   const trackedFilesOutput = await runGitAllowFailure(pi, repoRoot, ["ls-files", "--cached"]);
+  const trackedFileBlobOutput = await runGitAllowFailure(pi, repoRoot, ["ls-files", "--cached", "-s"]);
   const deletedFilesOutput = await runGitAllowFailure(pi, repoRoot, ["ls-files", "--deleted"]);
   const lastCommitOutput = repositoryHasHead
     ? await runGitAllowFailure(pi, repoRoot, ["diff-tree", "--root", "--find-renames", "-M", "--name-status", "--no-commit-id", "-r", "HEAD"])
     : "";
 
-  const worktreeChanges = mergeChangedPaths(parseNameStatus(trackedDiffOutput), parseUntrackedPaths(untrackedOutput))
+  const untrackedChanges = parseUntrackedPaths(untrackedOutput);
+  const worktreeChanges = mergeChangedPaths(parseNameStatus(trackedDiffOutput), untrackedChanges)
     .filter((change) => isReviewableFilePath(change.newPath ?? change.oldPath ?? ""));
   const deletedPaths = new Set(parseTrackedPaths(deletedFilesOutput));
   const currentPaths = uniquePaths([...parseTrackedPaths(trackedFilesOutput), ...parseTrackedPaths(untrackedOutput)])
@@ -278,6 +358,16 @@ export async function getReviewWindowData(pi: ExtensionAPI, cwd: string): Promis
     .filter(isReviewableFilePath);
   const lastCommitChanges = parseNameStatus(lastCommitOutput)
     .filter((change) => isReviewableFilePath(change.newPath ?? change.oldPath ?? ""));
+  const workingTreeIdentityByPath = parseTrackedFileBlobIdentities(trackedFileBlobOutput);
+  const pathsNeedingContentIdentity = new Set([
+    ...untrackedChanges.map((change) => change.newPath).filter((path): path is string => path != null),
+    ...worktreeChanges.map((change) => change.newPath).filter((path): path is string => path != null),
+  ]);
+  await Promise.all([...pathsNeedingContentIdentity]
+    .filter(isReviewableFilePath)
+    .map(async (path) => {
+      workingTreeIdentityByPath.set(path, await getWorkingTreeContentIdentity(repoRoot, path));
+    }));
 
   const seeds = new Map<string, ReviewFileSeed>();
 
@@ -325,9 +415,13 @@ export async function getReviewWindowData(pi: ExtensionAPI, cwd: string): Promis
     seed.lastCommit = toComparison(change);
   }
 
-  const files = [...seeds.values()]
+  const files = await Promise.all([...seeds.values()]
     .map(createReviewFile)
-    .sort(compareReviewFiles);
+    .map(async (file) => ({
+      ...file,
+      reviewFingerprint: await buildReviewFingerprint(pi, repoRoot, file, workingTreeIdentityByPath),
+    })));
+  files.sort(compareReviewFiles);
 
   return { repoRoot, files };
 }

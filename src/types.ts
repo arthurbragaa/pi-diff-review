@@ -14,6 +14,7 @@ export interface ReviewFileComparison {
 export interface ReviewFile {
   id: string;
   path: string;
+  reviewFingerprint: string;
   worktreeStatus: ChangeStatus | null;
   hasWorkingTreeFile: boolean;
   inGitDiff: boolean;
