@@ -9,7 +9,7 @@ const state = {
       : "all-files",
   comments: [],
   overallComment: "",
-  hideUnchanged: false,
+  hideUnchanged: true,
   wrapLines: true,
   collapsedDirs: {},
   reviewedFiles: {},
