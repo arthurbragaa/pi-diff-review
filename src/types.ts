@@ -44,6 +44,7 @@ export interface ReviewSubmitPayload {
   type: "submit";
   overallComment: string;
   comments: DiffReviewComment[];
+  reviewedFiles: Record<string, string>;
 }
 
 export interface ReviewCancelPayload {
@@ -81,4 +82,5 @@ export type ReviewHostMessage = ReviewFileDataMessage | ReviewFileErrorMessage;
 export interface ReviewWindowData {
   repoRoot: string;
   files: ReviewFile[];
+  reviewedFiles: Record<string, string>;
 }

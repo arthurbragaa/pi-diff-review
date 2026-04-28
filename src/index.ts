@@ -3,6 +3,7 @@ import { Key, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
 import { open, type GlimpseWindow } from "glimpseui";
 import { getReviewWindowData, loadReviewFileContents } from "./git.js";
 import { composeReviewPrompt } from "./prompt.js";
+import { loadReviewedFiles, saveReviewedFiles } from "./review-state.js";
 import type {
   ReviewCancelPayload,
   ReviewFile,
@@ -123,7 +124,8 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const html = buildReviewHtml({ repoRoot, files });
+    const reviewedFiles = await loadReviewedFiles(pi, repoRoot);
+    const html = buildReviewHtml({ repoRoot, files, reviewedFiles });
     const window = open(html, {
       width: 1680,
       height: 1020,
@@ -255,6 +257,14 @@ export default function (pi: ExtensionAPI) {
 
       if (message == null || message.type === "cancel") {
         ctx.ui.notify("Review cancelled.", "info");
+        return;
+      }
+
+      await saveReviewedFiles(pi, repoRoot, message.reviewedFiles);
+
+      const hasFeedback = message.overallComment.trim().length > 0 || message.comments.some((comment) => comment.body.trim().length > 0);
+      if (!hasFeedback) {
+        ctx.ui.notify("Review finished.", "info");
         return;
       }
 

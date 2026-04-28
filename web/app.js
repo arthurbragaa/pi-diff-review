@@ -59,9 +59,10 @@ let activeViewZones = [];
 let editorResizeObserver = null;
 let requestSequence = 0;
 
-const REVIEWED_STORAGE_KEY = "pi-diff-review.reviewed-files.v1";
 const reviewFileById = new Map(reviewData.files.map((file) => [file.id, file]));
-let persistedReviewedFiles = loadPersistedReviewedFiles();
+let persistedReviewedFiles = reviewData.reviewedFiles && typeof reviewData.reviewedFiles === "object"
+  ? { ...reviewData.reviewedFiles }
+  : {};
 
 function escapeHtml(value) {
   return String(value)
@@ -123,58 +124,34 @@ function statusBadgeClass(status) {
   }
 }
 
-function reviewedRepoStorageKey() {
-  return reviewData.repoRoot || "unknown-repo";
-}
-
 function reviewedFileStorageKey(file) {
   return file.path;
 }
 
-function loadPersistedReviewedFiles() {
-  try {
-    const raw = window.localStorage?.getItem(REVIEWED_STORAGE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function savePersistedReviewedFiles() {
-  try {
-    window.localStorage?.setItem(REVIEWED_STORAGE_KEY, JSON.stringify(persistedReviewedFiles));
-  } catch {}
-}
-
 function isFilePersistentlyReviewed(file) {
   if (!file || !file.reviewFingerprint) return false;
-  const repoReviews = persistedReviewedFiles[reviewedRepoStorageKey()];
-  return repoReviews?.[reviewedFileStorageKey(file)] === file.reviewFingerprint;
+  return persistedReviewedFiles[reviewedFileStorageKey(file)] === file.reviewFingerprint;
 }
 
 function setFilePersistentlyReviewed(file, reviewed) {
   if (!file || !file.reviewFingerprint) return;
-  const repoKey = reviewedRepoStorageKey();
   const fileKey = reviewedFileStorageKey(file);
-  const repoReviews = persistedReviewedFiles[repoKey] && typeof persistedReviewedFiles[repoKey] === "object"
-    ? persistedReviewedFiles[repoKey]
-    : {};
 
   if (reviewed) {
-    repoReviews[fileKey] = file.reviewFingerprint;
-    persistedReviewedFiles[repoKey] = repoReviews;
+    persistedReviewedFiles[fileKey] = file.reviewFingerprint;
   } else {
-    delete repoReviews[fileKey];
-    if (Object.keys(repoReviews).length === 0) {
-      delete persistedReviewedFiles[repoKey];
-    } else {
-      persistedReviewedFiles[repoKey] = repoReviews;
+    delete persistedReviewedFiles[fileKey];
+  }
+}
+
+function getReviewedFilesPayload() {
+  const reviewedFiles = {};
+  for (const file of reviewData.files) {
+    if (isFileReviewed(file.id)) {
+      reviewedFiles[reviewedFileStorageKey(file)] = file.reviewFingerprint;
     }
   }
-
-  savePersistedReviewedFiles();
+  return reviewedFiles;
 }
 
 function isFileReviewed(fileId) {
@@ -197,14 +174,18 @@ function getScopedFiles() {
 
 function ensureActiveFileForScope() {
   const scopedFiles = getScopedFiles();
-  if (scopedFiles.length === 0) {
+  const selectableFiles = state.showUnreviewedOnly
+    ? scopedFiles.filter((file) => !isFileReviewed(file.id))
+    : scopedFiles;
+
+  if (selectableFiles.length === 0) {
     state.activeFileId = null;
     return;
   }
-  if (scopedFiles.some((file) => file.id === state.activeFileId)) {
+  if (selectableFiles.some((file) => file.id === state.activeFileId)) {
     return;
   }
-  state.activeFileId = scopedFiles[0].id;
+  state.activeFileId = selectableFiles[0].id;
 }
 
 function activeFile() {
@@ -1098,6 +1079,7 @@ submitButton.addEventListener("click", () => {
     comments: state.comments
       .map((comment) => ({ ...comment, body: comment.body.trim() }))
       .filter((comment) => comment.body.length > 0),
+    reviewedFiles: getReviewedFilesPayload(),
   };
   window.glimpse.send(payload);
   window.glimpse.close();
@@ -1136,9 +1118,18 @@ toggleWrapButton.addEventListener("click", () => {
 toggleReviewedButton.addEventListener("click", () => {
   const file = activeFile();
   if (!file) return;
+  const visibleIndex = getFilteredFiles().findIndex((item) => item.id === file.id);
   const reviewed = !isFileReviewed(file.id);
   state.reviewedFiles[file.id] = reviewed;
   setFilePersistentlyReviewed(file, reviewed);
+
+  if (reviewed && state.showUnreviewedOnly) {
+    const remainingFiles = getFilteredFiles();
+    const nextFile = remainingFiles[visibleIndex] ?? remainingFiles[visibleIndex - 1] ?? remainingFiles[0] ?? null;
+    state.activeFileId = nextFile?.id ?? null;
+    if (nextFile) ensureFileLoaded(nextFile.id, state.currentScope);
+  }
+
   renderTree();
   updateToggleButtons();
 });
