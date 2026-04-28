@@ -14,6 +14,9 @@ declare module "glimpseui" {
     floating?: boolean;
     transparent?: boolean;
     clickThrough?: boolean;
+    noDock?: boolean;
+    openLinks?: boolean;
+    openLinksApp?: string;
     followCursor?: boolean;
     followMode?: FollowMode;
     cursorAnchor?: CursorAnchor;
@@ -55,6 +58,18 @@ declare module "glimpseui" {
     y: number;
   }
 
+  export interface GlimpseNativeHostInfo {
+    path: string;
+    platform: "darwin" | "linux" | "linux-chromium" | "win32" | "override";
+    buildHint: string;
+    extraArgs?: string[];
+  }
+
+  export interface GlimpseFollowCursorSupport {
+    supported: boolean;
+    reason?: string;
+  }
+
   export interface GlimpseInfo {
     screen: GlimpseScreenInfo;
     screens: GlimpseScreenInfo[];
@@ -67,11 +82,13 @@ declare module "glimpseui" {
     on(event: "ready", listener: (info: GlimpseInfo) => void): this;
     on(event: "message", listener: (data: unknown) => void): this;
     on(event: "info", listener: (info: GlimpseInfo) => void): this;
+    on(event: "click", listener: () => void): this;
     on(event: "closed", listener: () => void): this;
     on(event: "error", listener: (error: Error) => void): this;
     once(event: "ready", listener: (info: GlimpseInfo) => void): this;
     once(event: "message", listener: (data: unknown) => void): this;
     once(event: "info", listener: (info: GlimpseInfo) => void): this;
+    once(event: "click", listener: () => void): this;
     once(event: "closed", listener: () => void): this;
     once(event: "error", listener: (error: Error) => void): this;
     send(js: string): void;
@@ -84,6 +101,15 @@ declare module "glimpseui" {
     followCursor(enabled: boolean, anchor?: CursorAnchor, mode?: FollowMode): void;
   }
 
+  export class GlimpseStatusItem extends GlimpseWindow {
+    setTitle(title: string): void;
+    resize(width: number, height: number): void;
+  }
+
   export function open(html: string, options?: GlimpseOpenOptions): GlimpseWindow;
   export function prompt<T = unknown>(html: string, options?: GlimpseOpenOptions): Promise<T | null>;
+  export function statusItem(html: string, options?: GlimpseOpenOptions): GlimpseStatusItem;
+  export function getNativeHostInfo(): GlimpseNativeHostInfo;
+  export function supportsFollowCursor(): boolean;
+  export function getFollowCursorSupport(): GlimpseFollowCursorSupport;
 }
