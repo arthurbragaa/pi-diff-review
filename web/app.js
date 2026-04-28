@@ -328,6 +328,31 @@ function buildTree(files) {
   return root;
 }
 
+function sortedTreeChildren(node) {
+  return [...node.children.values()].sort((a, b) => {
+    if (a.kind !== b.kind) return a.kind === "dir" ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+function flattenTreeFiles(node, files = []) {
+  for (const child of sortedTreeChildren(node)) {
+    if (child.kind === "dir") {
+      flattenTreeFiles(child, files);
+    } else if (child.file) {
+      files.push(child.file);
+    }
+  }
+  return files;
+}
+
+function getDisplayedFilesInOrder() {
+  const visibleFiles = getFilteredFiles();
+  return state.fileFilter.trim()
+    ? visibleFiles
+    : flattenTreeFiles(buildTree(visibleFiles));
+}
+
 function cacheKey(scope, fileId) {
   return `${scope}:${fileId}`;
 }
@@ -418,10 +443,7 @@ function openFile(fileId) {
 }
 
 function renderTreeNode(node, depth) {
-  const children = [...node.children.values()].sort((a, b) => {
-    if (a.kind !== b.kind) return a.kind === "dir" ? -1 : 1;
-    return a.name.localeCompare(b.name);
-  });
+  const children = sortedTreeChildren(node);
 
   const indentPx = 12;
 
@@ -1118,13 +1140,13 @@ toggleWrapButton.addEventListener("click", () => {
 toggleReviewedButton.addEventListener("click", () => {
   const file = activeFile();
   if (!file) return;
-  const visibleIndex = getFilteredFiles().findIndex((item) => item.id === file.id);
+  const visibleIndex = getDisplayedFilesInOrder().findIndex((item) => item.id === file.id);
   const reviewed = !isFileReviewed(file.id);
   state.reviewedFiles[file.id] = reviewed;
   setFilePersistentlyReviewed(file, reviewed);
 
   if (reviewed && state.showUnreviewedOnly) {
-    const remainingFiles = getFilteredFiles();
+    const remainingFiles = getDisplayedFilesInOrder();
     const nextFile = remainingFiles[visibleIndex] ?? remainingFiles[visibleIndex - 1] ?? remainingFiles[0] ?? null;
     state.activeFileId = nextFile?.id ?? null;
     if (nextFile) ensureFileLoaded(nextFile.id, state.currentScope);
