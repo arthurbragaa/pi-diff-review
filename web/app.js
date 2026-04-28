@@ -15,6 +15,7 @@ const state = {
   reviewedFiles: {},
   scrollPositions: {},
   sidebarCollapsed: false,
+  showUnreviewedOnly: true,
   fileFilter: "",
   fileContents: {},
   fileErrors: {},
@@ -28,6 +29,7 @@ const toggleSidebarButton = document.getElementById("toggle-sidebar-button");
 const scopeDiffButton = document.getElementById("scope-diff-button");
 const scopeLastCommitButton = document.getElementById("scope-last-commit-button");
 const scopeAllButton = document.getElementById("scope-all-button");
+const filterUnreviewedButton = document.getElementById("filter-unreviewed-button");
 const windowTitleEl = document.getElementById("window-title");
 const repoRootEl = document.getElementById("repo-root");
 const fileTreeEl = document.getElementById("file-tree");
@@ -302,7 +304,9 @@ function getFileSearchScore(query, file) {
 }
 
 function getFilteredFiles() {
-  const scopedFiles = getScopedFiles();
+  const scopedFiles = state.showUnreviewedOnly
+    ? getScopedFiles().filter((file) => !isFileReviewed(file.id))
+    : getScopedFiles();
   const query = state.fileFilter.trim();
   if (!query) return [...scopedFiles];
 
@@ -559,6 +563,10 @@ function updateScopeButtons() {
   applyButtonClasses(scopeDiffButton, state.currentScope === "git-diff", counts.diff === 0);
   applyButtonClasses(scopeLastCommitButton, state.currentScope === "last-commit", counts.lastCommit === 0);
   applyButtonClasses(scopeAllButton, state.currentScope === "all-files", counts.all === 0);
+
+  const unreviewedCount = getScopedFiles().filter((file) => !isFileReviewed(file.id)).length;
+  filterUnreviewedButton.textContent = `Unreviewed only${unreviewedCount > 0 ? ` (${unreviewedCount})` : ""}`;
+  applyButtonClasses(filterUnreviewedButton, state.showUnreviewedOnly, false);
 }
 
 function updateToggleButtons() {
@@ -600,8 +608,10 @@ function renderTree() {
 
   if (visibleFiles.length === 0) {
     const message = state.fileFilter.trim()
-      ? `No files match <span class="text-review-text">${escapeHtml(state.fileFilter.trim())}</span>.`
-      : `No files in <span class="text-review-text">${escapeHtml(scopeLabel(state.currentScope).toLowerCase())}</span>.`;
+      ? `No files match <span class="text-review-text">${escapeHtml(state.fileFilter.trim())}</span>${state.showUnreviewedOnly ? " among unreviewed files" : ""}.`
+      : state.showUnreviewedOnly
+        ? `No unreviewed files in <span class="text-review-text">${escapeHtml(scopeLabel(state.currentScope).toLowerCase())}</span>.`
+        : `No files in <span class="text-review-text">${escapeHtml(scopeLabel(state.currentScope).toLowerCase())}</span>.`;
     fileTreeEl.innerHTML = `
       <div class="px-3 py-4 text-sm text-review-muted">
         ${message}
@@ -615,7 +625,7 @@ function renderTree() {
 
   sidebarTitleEl.textContent = scopeLabel(state.currentScope);
   const comments = state.comments.length;
-  const filteredSuffix = state.fileFilter.trim() ? ` • ${visibleFiles.length} shown` : "";
+  const filteredSuffix = state.fileFilter.trim() || state.showUnreviewedOnly ? ` • ${visibleFiles.length} shown` : "";
   summaryEl.textContent = `${scopedFiles.length} file(s) • ${comments} comment(s)${state.overallComment ? " • overall note" : ""}${filteredSuffix}`;
   updateToggleButtons();
   updateSidebarLayout();
@@ -1143,6 +1153,11 @@ scopeLastCommitButton.addEventListener("click", () => {
 
 scopeAllButton.addEventListener("click", () => {
   switchScope("all-files");
+});
+
+filterUnreviewedButton.addEventListener("click", () => {
+  state.showUnreviewedOnly = !state.showUnreviewedOnly;
+  renderTree();
 });
 
 toggleSidebarButton.addEventListener("click", () => {
