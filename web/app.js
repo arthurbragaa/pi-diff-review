@@ -372,10 +372,12 @@ function sortedTreeChildren(node) {
   });
 }
 
-function flattenTreeFiles(node, files = []) {
+function flattenVisibleTreeFiles(node, files = []) {
   for (const child of sortedTreeChildren(node)) {
     if (child.kind === "dir") {
-      flattenTreeFiles(child, files);
+      if (state.collapsedDirs[child.path] !== true) {
+        flattenVisibleTreeFiles(child, files);
+      }
     } else if (child.file) {
       files.push(child.file);
     }
@@ -387,7 +389,7 @@ function getDisplayedFilesInOrder() {
   const visibleFiles = getFilteredFiles();
   return state.fileFilter.trim()
     ? visibleFiles
-    : flattenTreeFiles(buildTree(visibleFiles));
+    : flattenVisibleTreeFiles(buildTree(visibleFiles));
 }
 
 function scopeBranchKey(scope) {
