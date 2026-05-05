@@ -1197,11 +1197,9 @@ toggleReviewedButton.addEventListener("click", () => {
     const remainingFiles = getDisplayedFilesInOrder();
     const nextFile = remainingFiles[visibleIndex] ?? remainingFiles[visibleIndex - 1] ?? remainingFiles[0] ?? null;
     state.activeFileId = nextFile?.id ?? null;
-    if (nextFile) ensureFileLoaded(nextFile.id, state.currentScope);
   }
 
-  renderTree();
-  updateToggleButtons();
+  renderAll({ restoreFileScroll: true });
 });
 
 branchComparisonSelect.addEventListener("change", () => {
