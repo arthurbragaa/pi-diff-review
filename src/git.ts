@@ -248,14 +248,19 @@ async function getWorkingTreeContentIdentity(repoRoot: string, path: string): Pr
   }
 }
 
-async function buildComparisonFingerprintParts(pi: ExtensionAPI, repoRoot: string, scope: ReviewScope, comparison: ReviewFileComparison, branchComparison: BranchComparison | null): Promise<Record<string, string>> {
-  const originalRevision = scope === "branch-diff"
-    ? branchComparison?.baseRevision ?? "HEAD"
-    : scope === "git-diff"
-      ? "HEAD"
-      : "HEAD^";
-  const modifiedRevision = scope === "branch-diff" || scope === "git-diff" ? null : "HEAD";
+function getComparisonRevisions(scope: ReviewScope, branchComparison: BranchComparison | null): { originalRevision: string; modifiedRevision: string | null } {
+  return {
+    originalRevision: scope === "branch-diff"
+      ? branchComparison?.baseRevision ?? "HEAD"
+      : scope === "git-diff"
+        ? "HEAD"
+        : "HEAD^",
+    modifiedRevision: scope === "branch-diff" || scope === "git-diff" ? null : "HEAD",
+  };
+}
 
+async function getComparisonContentIdentities(pi: ExtensionAPI, repoRoot: string, scope: ReviewScope, comparison: ReviewFileComparison, branchComparison: BranchComparison | null): Promise<{ original: string; modified: string }> {
+  const { originalRevision, modifiedRevision } = getComparisonRevisions(scope, branchComparison);
   const original = comparison.oldPath == null
     ? "none"
     : await getRevisionBlobIdentity(pi, repoRoot, originalRevision, comparison.oldPath);
@@ -265,6 +270,12 @@ async function buildComparisonFingerprintParts(pi: ExtensionAPI, repoRoot: strin
       ? await getWorkingTreeContentIdentity(repoRoot, comparison.newPath)
       : await getRevisionBlobIdentity(pi, repoRoot, modifiedRevision, comparison.newPath);
 
+  return { original, modified };
+}
+
+async function buildComparisonFingerprintParts(pi: ExtensionAPI, repoRoot: string, scope: ReviewScope, comparison: ReviewFileComparison, branchComparison: BranchComparison | null): Promise<Record<string, string>> {
+  const { original, modified } = await getComparisonContentIdentities(pi, repoRoot, scope, comparison, branchComparison);
+
   return {
     status: comparison.status,
     oldPath: comparison.oldPath ?? "",
@@ -272,6 +283,15 @@ async function buildComparisonFingerprintParts(pi: ExtensionAPI, repoRoot: strin
     original,
     modified,
   };
+}
+
+async function filterChangedContent(pi: ExtensionAPI, repoRoot: string, scope: ReviewScope, changes: ChangedPath[], branchComparison: BranchComparison | null = null): Promise<ChangedPath[]> {
+  const filtered = await Promise.all(changes.map(async (change) => {
+    if (change.status !== "modified") return change;
+    const { original, modified } = await getComparisonContentIdentities(pi, repoRoot, scope, toComparison(change), branchComparison);
+    return original === modified ? null : change;
+  }));
+  return filtered.filter((change): change is ChangedPath => change != null);
 }
 
 async function buildReviewFingerprint(pi: ExtensionAPI, repoRoot: string, file: ReviewFile, workingTreeIdentityByPath: Map<string, string>): Promise<string> {
@@ -401,19 +421,19 @@ export async function getReviewWindowData(pi: ExtensionAPI, cwd: string): Promis
     : "";
 
   const untrackedChanges = parseUntrackedPaths(untrackedOutput);
-  const worktreeChanges = mergeChangedPaths(parseNameStatus(trackedDiffOutput), untrackedChanges)
-    .filter((change) => isReviewableFilePath(change.newPath ?? change.oldPath ?? ""));
-  const branchChangesByBranch = new Map(branchDiffOutputs.map(({ comparison, output }) => [
+  const worktreeChanges = await filterChangedContent(pi, repoRoot, "git-diff", mergeChangedPaths(parseNameStatus(trackedDiffOutput), untrackedChanges)
+    .filter((change) => isReviewableFilePath(change.newPath ?? change.oldPath ?? "")));
+  const branchChangesByBranch = new Map(await Promise.all(branchDiffOutputs.map(async ({ comparison, output }) => [
     comparison.branch,
-    mergeChangedPaths(parseNameStatus(output), untrackedChanges)
-      .filter((change) => isReviewableFilePath(change.newPath ?? change.oldPath ?? "")),
-  ]));
+    await filterChangedContent(pi, repoRoot, "branch-diff", mergeChangedPaths(parseNameStatus(output), untrackedChanges)
+      .filter((change) => isReviewableFilePath(change.newPath ?? change.oldPath ?? "")), comparison),
+  ] as const)));
   const deletedPaths = new Set(parseTrackedPaths(deletedFilesOutput));
   const currentPaths = uniquePaths([...parseTrackedPaths(trackedFilesOutput), ...parseTrackedPaths(untrackedOutput)])
     .filter((path) => !deletedPaths.has(path))
     .filter(isReviewableFilePath);
-  const lastCommitChanges = parseNameStatus(lastCommitOutput)
-    .filter((change) => isReviewableFilePath(change.newPath ?? change.oldPath ?? ""));
+  const lastCommitChanges = await filterChangedContent(pi, repoRoot, "last-commit", parseNameStatus(lastCommitOutput)
+    .filter((change) => isReviewableFilePath(change.newPath ?? change.oldPath ?? "")));
   const workingTreeIdentityByPath = parseTrackedFileBlobIdentities(trackedFileBlobOutput);
   const pathsNeedingContentIdentity = new Set([
     ...untrackedChanges.map((change) => change.newPath).filter((path): path is string => path != null),
