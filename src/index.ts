@@ -1,3 +1,5 @@
+import { readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
 import { open, type GlimpseWindow } from "glimpseui";
@@ -31,6 +33,45 @@ type WaitingEditorResult = "escape" | "window-settled";
 
 function escapeForInlineScript(value: string): string {
   return value.replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
+}
+
+function waylandSocketExists(display: string): boolean {
+  const runtimeDir = process.env.XDG_RUNTIME_DIR;
+  if (!runtimeDir) return false;
+
+  const socketPath = display.startsWith("/") ? display : join(runtimeDir, display);
+  try {
+    return statSync(socketPath).isSocket();
+  } catch {
+    return false;
+  }
+}
+
+function detectWaylandDisplay(): string | null {
+  const runtimeDir = process.env.XDG_RUNTIME_DIR;
+  if (!runtimeDir) return null;
+
+  try {
+    const sockets = readdirSync(runtimeDir, { withFileTypes: true })
+      .filter((entry) => entry.isSocket() && /^wayland-\d+$/.test(entry.name))
+      .map((entry) => entry.name)
+      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    return sockets[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function ensureGlimpseDisplayEnvironment(): void {
+  if (process.platform !== "linux") return;
+
+  const currentWaylandDisplay = process.env.WAYLAND_DISPLAY;
+  if (currentWaylandDisplay && waylandSocketExists(currentWaylandDisplay)) return;
+
+  const detectedWaylandDisplay = detectWaylandDisplay();
+  if (detectedWaylandDisplay) {
+    process.env.WAYLAND_DISPLAY = detectedWaylandDisplay;
+  }
 }
 
 export default function (pi: ExtensionAPI) {
@@ -126,6 +167,7 @@ export default function (pi: ExtensionAPI) {
 
     const reviewedFiles = await loadReviewedFiles(pi, repoRoot);
     const html = buildReviewHtml({ repoRoot, files, reviewedFiles });
+    ensureGlimpseDisplayEnvironment();
     const window = open(html, {
       width: 1680,
       height: 1020,
