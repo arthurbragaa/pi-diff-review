@@ -159,14 +159,14 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const { repoRoot, files } = await getReviewWindowData(pi, ctx.cwd);
+    const { repoRoot, files, branchComparisons } = await getReviewWindowData(pi, ctx.cwd);
     if (files.length === 0) {
       ctx.ui.notify("No reviewable files found.", "info");
       return;
     }
 
     const reviewedFiles = await loadReviewedFiles(pi, repoRoot);
-    const html = buildReviewHtml({ repoRoot, files, reviewedFiles });
+    const html = buildReviewHtml({ repoRoot, files, reviewedFiles, branchComparisons });
     ensureGlimpseDisplayEnvironment();
     const window = open(html, {
       width: 1680,
@@ -185,12 +185,15 @@ export default function (pi: ExtensionAPI) {
       window.send(`window.__reviewReceive(${payload});`);
     };
 
-    const loadContents = (file: ReviewFile, scope: ReviewRequestFilePayload["scope"]): Promise<ReviewFileContents> => {
-      const cacheKey = `${scope}:${file.id}`;
+    const loadContents = (file: ReviewFile, scope: ReviewRequestFilePayload["scope"], branch: string | null): Promise<ReviewFileContents> => {
+      const branchComparison = scope === "branch-diff"
+        ? branchComparisons.find((comparison) => comparison.branch === branch) ?? null
+        : null;
+      const cacheKey = `${scope}:${branchComparison?.branch ?? ""}:${file.id}`;
       const cached = contentCache.get(cacheKey);
       if (cached != null) return cached;
 
-      const pending = loadReviewFileContents(pi, repoRoot, file, scope);
+      const pending = loadReviewFileContents(pi, repoRoot, file, scope, branchComparison);
       contentCache.set(cacheKey, pending);
       return pending;
     };
@@ -225,18 +228,20 @@ export default function (pi: ExtensionAPI) {
               requestId: message.requestId,
               fileId: message.fileId,
               scope: message.scope,
+              branch: message.branch,
               message: "Unknown file requested.",
             });
             return;
           }
 
           try {
-            const contents = await loadContents(file, message.scope);
+            const contents = await loadContents(file, message.scope, message.branch);
             sendWindowMessage({
               type: "file-data",
               requestId: message.requestId,
               fileId: message.fileId,
               scope: message.scope,
+              branch: message.branch,
               originalContent: contents.originalContent,
               modifiedContent: contents.modifiedContent,
             });
@@ -247,6 +252,7 @@ export default function (pi: ExtensionAPI) {
               requestId: message.requestId,
               fileId: message.fileId,
               scope: message.scope,
+              branch: message.branch,
               message: messageText,
             });
           }
@@ -322,7 +328,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand("diff-review", {
-    description: "Open a native review window with git diff, last commit, and all files scopes",
+    description: "Open a native review window with git diff, last commit, all files, and optional main/master comparison scopes",
     handler: async (_args, ctx) => {
       await reviewRepository(ctx);
     },

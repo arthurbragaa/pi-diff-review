@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import type { ChangeStatus, ReviewFile, ReviewFileComparison, ReviewFileContents, ReviewScope } from "./types.js";
+import type { BranchComparison, ChangeStatus, ReviewFile, ReviewFileComparison, ReviewFileContents, ReviewScope } from "./types.js";
 
 interface ChangedPath {
   status: ChangeStatus;
@@ -14,8 +14,10 @@ interface ReviewFileSeed {
   path: string;
   worktreeStatus: ChangeStatus | null;
   hasWorkingTreeFile: boolean;
+  inBranchDiffs: Record<string, boolean>;
   inGitDiff: boolean;
   inLastCommit: boolean;
+  branchDiffs: Record<string, ReviewFileComparison | null>;
   gitDiff: ReviewFileComparison | null;
   lastCommit: ReviewFileComparison | null;
 }
@@ -48,6 +50,42 @@ export async function getRepoRoot(pi: ExtensionAPI, cwd: string): Promise<string
 async function hasHead(pi: ExtensionAPI, repoRoot: string): Promise<boolean> {
   const result = await pi.exec("git", ["rev-parse", "--verify", "HEAD"], { cwd: repoRoot });
   return result.code === 0;
+}
+
+function parseBranchNames(output: string): string[] {
+  return [...new Set(output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => !line.endsWith("/HEAD")))]
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+}
+
+export async function listDefaultComparisonBranches(pi: ExtensionAPI, repoRoot: string): Promise<string[]> {
+  const output = await runGitAllowFailure(pi, repoRoot, [
+    "for-each-ref",
+    "--format=%(refname:short)",
+    "refs/heads/main",
+    "refs/heads/master",
+  ]);
+  const branches = parseBranchNames(output);
+  return ["main", "master"].filter((branch) => branches.includes(branch));
+}
+
+async function resolveBranchComparison(pi: ExtensionAPI, repoRoot: string, branch: string, repositoryHasHead: boolean): Promise<BranchComparison | null> {
+  if (!repositoryHasHead) return null;
+
+  const result = await pi.exec("git", ["merge-base", branch, "HEAD"], { cwd: repoRoot });
+  if (result.code !== 0) return null;
+
+  const baseRevision = result.stdout.trim();
+  if (!baseRevision) return null;
+
+  return {
+    branch,
+    baseRevision,
+    label: `Compare with ${branch}`,
+  };
 }
 
 function parseNameStatus(output: string): ChangedPath[] {
@@ -182,8 +220,10 @@ function createReviewFile(seed: ReviewFileSeed): ReviewFile {
     reviewFingerprint: "",
     worktreeStatus: seed.worktreeStatus,
     hasWorkingTreeFile: seed.hasWorkingTreeFile,
+    inBranchDiffs: seed.inBranchDiffs,
     inGitDiff: seed.inGitDiff,
     inLastCommit: seed.inLastCommit,
+    branchDiffs: seed.branchDiffs,
     gitDiff: seed.gitDiff,
     lastCommit: seed.lastCommit,
   };
@@ -208,9 +248,13 @@ async function getWorkingTreeContentIdentity(repoRoot: string, path: string): Pr
   }
 }
 
-async function buildComparisonFingerprintParts(pi: ExtensionAPI, repoRoot: string, scope: ReviewScope, comparison: ReviewFileComparison): Promise<Record<string, string>> {
-  const originalRevision = scope === "git-diff" ? "HEAD" : "HEAD^";
-  const modifiedRevision = scope === "git-diff" ? null : "HEAD";
+async function buildComparisonFingerprintParts(pi: ExtensionAPI, repoRoot: string, scope: ReviewScope, comparison: ReviewFileComparison, branchComparison: BranchComparison | null): Promise<Record<string, string>> {
+  const originalRevision = scope === "branch-diff"
+    ? branchComparison?.baseRevision ?? "HEAD"
+    : scope === "git-diff"
+      ? "HEAD"
+      : "HEAD^";
+  const modifiedRevision = scope === "branch-diff" || scope === "git-diff" ? null : "HEAD";
 
   const original = comparison.oldPath == null
     ? "none"
@@ -244,10 +288,10 @@ async function buildReviewFingerprint(pi: ExtensionAPI, repoRoot: string, file: 
   };
 
   if (file.gitDiff != null) {
-    parts.gitDiff = await buildComparisonFingerprintParts(pi, repoRoot, "git-diff", file.gitDiff);
+    parts.gitDiff = await buildComparisonFingerprintParts(pi, repoRoot, "git-diff", file.gitDiff, null);
   }
   if (file.lastCommit != null) {
-    parts.lastCommit = await buildComparisonFingerprintParts(pi, repoRoot, "last-commit", file.lastCommit);
+    parts.lastCommit = await buildComparisonFingerprintParts(pi, repoRoot, "last-commit", file.lastCommit, null);
   }
 
   return hashText(JSON.stringify(parts));
@@ -334,13 +378,20 @@ function upsertSeed(seeds: Map<string, ReviewFileSeed>, key: string, create: () 
   return seed;
 }
 
-export async function getReviewWindowData(pi: ExtensionAPI, cwd: string): Promise<{ repoRoot: string; files: ReviewFile[] }> {
+export async function getReviewWindowData(pi: ExtensionAPI, cwd: string): Promise<{ repoRoot: string; files: ReviewFile[]; branchComparisons: BranchComparison[] }> {
   const repoRoot = await getRepoRoot(pi, cwd);
   const repositoryHasHead = await hasHead(pi, repoRoot);
+  const branchComparisons = (await Promise.all((await listDefaultComparisonBranches(pi, repoRoot))
+    .map((branch) => resolveBranchComparison(pi, repoRoot, branch, repositoryHasHead))))
+    .filter((comparison): comparison is BranchComparison => comparison != null);
 
   const trackedDiffOutput = repositoryHasHead
     ? await runGit(pi, repoRoot, ["diff", "--find-renames", "-M", "--name-status", "HEAD", "--"])
     : "";
+  const branchDiffOutputs = await Promise.all(branchComparisons.map(async (comparison) => ({
+    comparison,
+    output: await runGit(pi, repoRoot, ["diff", "--find-renames", "-M", "--name-status", comparison.baseRevision, "--"]),
+  })));
   const untrackedOutput = await runGitAllowFailure(pi, repoRoot, ["ls-files", "--others", "--exclude-standard"]);
   const trackedFilesOutput = await runGitAllowFailure(pi, repoRoot, ["ls-files", "--cached"]);
   const trackedFileBlobOutput = await runGitAllowFailure(pi, repoRoot, ["ls-files", "--cached", "-s"]);
@@ -352,6 +403,11 @@ export async function getReviewWindowData(pi: ExtensionAPI, cwd: string): Promis
   const untrackedChanges = parseUntrackedPaths(untrackedOutput);
   const worktreeChanges = mergeChangedPaths(parseNameStatus(trackedDiffOutput), untrackedChanges)
     .filter((change) => isReviewableFilePath(change.newPath ?? change.oldPath ?? ""));
+  const branchChangesByBranch = new Map(branchDiffOutputs.map(({ comparison, output }) => [
+    comparison.branch,
+    mergeChangedPaths(parseNameStatus(output), untrackedChanges)
+      .filter((change) => isReviewableFilePath(change.newPath ?? change.oldPath ?? "")),
+  ]));
   const deletedPaths = new Set(parseTrackedPaths(deletedFilesOutput));
   const currentPaths = uniquePaths([...parseTrackedPaths(trackedFilesOutput), ...parseTrackedPaths(untrackedOutput)])
     .filter((path) => !deletedPaths.has(path))
@@ -362,6 +418,7 @@ export async function getReviewWindowData(pi: ExtensionAPI, cwd: string): Promis
   const pathsNeedingContentIdentity = new Set([
     ...untrackedChanges.map((change) => change.newPath).filter((path): path is string => path != null),
     ...worktreeChanges.map((change) => change.newPath).filter((path): path is string => path != null),
+    ...[...branchChangesByBranch.values()].flat().map((change) => change.newPath).filter((path): path is string => path != null),
   ]);
   await Promise.all([...pathsNeedingContentIdentity]
     .filter(isReviewableFilePath)
@@ -371,46 +428,44 @@ export async function getReviewWindowData(pi: ExtensionAPI, cwd: string): Promis
 
   const seeds = new Map<string, ReviewFileSeed>();
 
+  const createSeed = (path: string, hasWorkingTreeFile: boolean): ReviewFileSeed => ({
+    path,
+    worktreeStatus: null,
+    hasWorkingTreeFile,
+    inBranchDiffs: {},
+    inGitDiff: false,
+    inLastCommit: false,
+    branchDiffs: {},
+    gitDiff: null,
+    lastCommit: null,
+  });
+
   for (const path of currentPaths) {
-    seeds.set(path, {
-      path,
-      worktreeStatus: null,
-      hasWorkingTreeFile: true,
-      inGitDiff: false,
-      inLastCommit: false,
-      gitDiff: null,
-      lastCommit: null,
-    });
+    seeds.set(path, createSeed(path, true));
   }
 
   for (const change of worktreeChanges) {
     const key = change.newPath ?? change.oldPath ?? toDisplayPath(change);
-    const seed = upsertSeed(seeds, key, () => ({
-      path: key,
-      worktreeStatus: null,
-      hasWorkingTreeFile: change.newPath != null,
-      inGitDiff: false,
-      inLastCommit: false,
-      gitDiff: null,
-      lastCommit: null,
-    }));
+    const seed = upsertSeed(seeds, key, () => createSeed(key, change.newPath != null));
     seed.worktreeStatus = change.status;
     seed.hasWorkingTreeFile = change.newPath != null;
     seed.inGitDiff = true;
     seed.gitDiff = toComparison(change);
   }
 
+  for (const [branch, branchChanges] of branchChangesByBranch) {
+    for (const change of branchChanges) {
+      const key = change.newPath ?? change.oldPath ?? toDisplayPath(change);
+      const seed = upsertSeed(seeds, key, () => createSeed(key, change.newPath != null));
+      seed.hasWorkingTreeFile = change.newPath != null;
+      seed.inBranchDiffs[branch] = true;
+      seed.branchDiffs[branch] = toComparison(change);
+    }
+  }
+
   for (const change of lastCommitChanges) {
     const key = change.newPath ?? change.oldPath ?? toDisplayPath(change);
-    const seed = upsertSeed(seeds, key, () => ({
-      path: key,
-      worktreeStatus: null,
-      hasWorkingTreeFile: change.newPath != null && currentPaths.includes(change.newPath),
-      inGitDiff: false,
-      inLastCommit: false,
-      gitDiff: null,
-      lastCommit: null,
-    }));
+    const seed = upsertSeed(seeds, key, () => createSeed(key, change.newPath != null && currentPaths.includes(change.newPath)));
     seed.inLastCommit = true;
     seed.lastCommit = toComparison(change);
   }
@@ -423,10 +478,10 @@ export async function getReviewWindowData(pi: ExtensionAPI, cwd: string): Promis
     })));
   files.sort(compareReviewFiles);
 
-  return { repoRoot, files };
+  return { repoRoot, files, branchComparisons };
 }
 
-export async function loadReviewFileContents(pi: ExtensionAPI, repoRoot: string, file: ReviewFile, scope: ReviewScope): Promise<ReviewFileContents> {
+export async function loadReviewFileContents(pi: ExtensionAPI, repoRoot: string, file: ReviewFile, scope: ReviewScope, branchComparison: BranchComparison | null): Promise<ReviewFileContents> {
   if (scope === "all-files") {
     const content = file.hasWorkingTreeFile ? await getWorkingTreeContent(repoRoot, file.path) : "";
     return {
@@ -435,7 +490,7 @@ export async function loadReviewFileContents(pi: ExtensionAPI, repoRoot: string,
     };
   }
 
-  const comparison = scope === "git-diff" ? file.gitDiff : file.lastCommit;
+  const comparison = scope === "branch-diff" ? (branchComparison == null ? null : file.branchDiffs[branchComparison.branch]) : scope === "git-diff" ? file.gitDiff : file.lastCommit;
   if (comparison == null) {
     return {
       originalContent: "",
@@ -443,8 +498,12 @@ export async function loadReviewFileContents(pi: ExtensionAPI, repoRoot: string,
     };
   }
 
-  const originalRevision = scope === "git-diff" ? "HEAD" : "HEAD^";
-  const modifiedRevision = scope === "git-diff" ? null : "HEAD";
+  const originalRevision = scope === "branch-diff"
+    ? branchComparison?.baseRevision ?? "HEAD"
+    : scope === "git-diff"
+      ? "HEAD"
+      : "HEAD^";
+  const modifiedRevision = scope === "branch-diff" || scope === "git-diff" ? null : "HEAD";
 
   const originalContent = comparison.oldPath == null ? "" : await getRevisionContent(pi, repoRoot, originalRevision, comparison.oldPath);
   const modifiedContent = comparison.newPath == null

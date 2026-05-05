@@ -7,6 +7,7 @@ const state = {
     : reviewData.files.some((file) => file.inLastCommit)
       ? "last-commit"
       : "all-files",
+  selectedBranch: null,
   comments: [],
   overallComment: "",
   hideUnchanged: true,
@@ -26,6 +27,8 @@ const sidebarEl = document.getElementById("sidebar");
 const sidebarTitleEl = document.getElementById("sidebar-title");
 const sidebarSearchInputEl = document.getElementById("sidebar-search-input");
 const toggleSidebarButton = document.getElementById("toggle-sidebar-button");
+const branchComparisonSelect = document.getElementById("branch-comparison-select");
+const scopeBranchButton = document.getElementById("scope-branch-button");
 const scopeDiffButton = document.getElementById("scope-diff-button");
 const scopeLastCommitButton = document.getElementById("scope-last-commit-button");
 const scopeAllButton = document.getElementById("scope-all-button");
@@ -64,6 +67,21 @@ let persistedReviewedFiles = reviewData.reviewedFiles && typeof reviewData.revie
   ? { ...reviewData.reviewedFiles }
   : {};
 
+function setupBranchComparisonSelect() {
+  const comparisons = reviewData.branchComparisons || [];
+  branchComparisonSelect.innerHTML = '<option value="">None</option>';
+  for (const comparison of comparisons) {
+    const option = document.createElement("option");
+    option.value = comparison.branch;
+    option.textContent = comparison.branch;
+    branchComparisonSelect.appendChild(option);
+  }
+  branchComparisonSelect.disabled = comparisons.length === 0;
+  if (comparisons.length === 0) {
+    branchComparisonSelect.title = "No main or master branch found.";
+  }
+}
+
 function escapeHtml(value) {
   return String(value)
     .replace(/&/g, "&amp;")
@@ -91,8 +109,14 @@ function inferLanguage(path) {
   return "plaintext";
 }
 
+function selectedBranchComparison() {
+  if (!state.selectedBranch) return null;
+  return (reviewData.branchComparisons || []).find((comparison) => comparison.branch === state.selectedBranch) || null;
+}
+
 function scopeLabel(scope) {
   switch (scope) {
+    case "branch-diff": return selectedBranchComparison()?.label || "Branch diff";
     case "git-diff": return "Git diff";
     case "last-commit": return "Last commit";
     default: return "All files";
@@ -101,6 +125,8 @@ function scopeLabel(scope) {
 
 function scopeHint(scope) {
   switch (scope) {
+    case "branch-diff":
+      return `Review current worktree changes against ${state.selectedBranch || "the selected branch"}. Hover or click line numbers in the gutter to add an inline comment.`;
     case "git-diff":
       return "Review working tree changes against HEAD. Hover or click line numbers in the gutter to add an inline comment.";
     case "last-commit":
@@ -163,6 +189,10 @@ function isFileReviewed(fileId) {
 
 function getScopedFiles() {
   switch (state.currentScope) {
+    case "branch-diff":
+      return state.selectedBranch
+        ? reviewData.files.filter((file) => file.inBranchDiffs?.[state.selectedBranch])
+        : [];
     case "git-diff":
       return reviewData.files.filter((file) => file.inGitDiff);
     case "last-commit":
@@ -194,6 +224,7 @@ function activeFile() {
 
 function getScopeComparison(file, scope = state.currentScope) {
   if (!file) return null;
+  if (scope === "branch-diff") return state.selectedBranch ? file.branchDiffs?.[state.selectedBranch] ?? null : null;
   if (scope === "git-diff") return file.gitDiff;
   if (scope === "last-commit") return file.lastCommit;
   return null;
@@ -205,6 +236,12 @@ function activeComparison() {
 
 function activeFileShowsDiff() {
   return activeComparison() != null;
+}
+
+function commentMatchesScope(comment, scope = state.currentScope) {
+  if (comment.scope !== scope) return false;
+  if (scope !== "branch-diff") return true;
+  return (comment.branch || "") === (state.selectedBranch || "");
 }
 
 function getScopeFilePath(file) {
@@ -353,12 +390,16 @@ function getDisplayedFilesInOrder() {
     : flattenTreeFiles(buildTree(visibleFiles));
 }
 
-function cacheKey(scope, fileId) {
-  return `${scope}:${fileId}`;
+function scopeBranchKey(scope) {
+  return scope === "branch-diff" ? state.selectedBranch || "" : "";
+}
+
+function cacheKey(scope, fileId, branch = scopeBranchKey(scope)) {
+  return `${scope}:${branch || ""}:${fileId}`;
 }
 
 function scrollKey(scope, fileId) {
-  return `${scope}:${fileId}`;
+  return `${scope}:${scopeBranchKey(scope)}:${fileId}`;
 }
 
 function saveCurrentScrollPosition() {
@@ -427,7 +468,7 @@ function ensureFileLoaded(fileId, scope = state.currentScope) {
   state.pendingRequestIds[key] = requestId;
   renderTree();
   if (window.glimpse?.send) {
-    window.glimpse.send({ type: "request-file", requestId, fileId, scope });
+    window.glimpse.send({ type: "request-file", requestId, fileId, scope, branch: scope === "branch-diff" ? state.selectedBranch : null });
   }
 }
 
@@ -470,7 +511,7 @@ function renderTreeNode(node, depth) {
     }
 
     const file = child.file;
-    const count = state.comments.filter((comment) => comment.fileId === file.id && comment.scope === state.currentScope).length;
+    const count = state.comments.filter((comment) => comment.fileId === file.id && commentMatchesScope(comment)).length;
     const reviewed = isFileReviewed(file.id);
     const requestState = getRequestState(file.id, state.currentScope);
     const loading = requestState.requestId != null && requestState.contents == null;
@@ -503,7 +544,7 @@ function renderSearchResults(files) {
     const path = getFileSearchPath(file);
     const baseName = getBaseName(path);
     const parentPath = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
-    const count = state.comments.filter((comment) => comment.fileId === file.id && comment.scope === state.currentScope).length;
+    const count = state.comments.filter((comment) => comment.fileId === file.id && commentMatchesScope(comment)).length;
     const reviewed = isFileReviewed(file.id);
     const requestState = getRequestState(file.id, state.currentScope);
     const loading = requestState.requestId != null && requestState.contents == null;
@@ -545,6 +586,7 @@ function updateSidebarLayout() {
 
 function updateScopeButtons() {
   const counts = {
+    branch: state.selectedBranch ? reviewData.files.filter((file) => file.inBranchDiffs?.[state.selectedBranch]).length : 0,
     diff: reviewData.files.filter((file) => file.inGitDiff).length,
     lastCommit: reviewData.files.filter((file) => file.inLastCommit).length,
     all: reviewData.files.filter((file) => file.hasWorkingTreeFile).length,
@@ -559,10 +601,13 @@ function updateScopeButtons() {
         : "cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]";
   };
 
+  scopeBranchButton.style.display = state.selectedBranch ? "inline-flex" : "none";
+  scopeBranchButton.textContent = `${scopeLabel("branch-diff")}${counts.branch > 0 ? ` (${counts.branch})` : ""}`;
   scopeDiffButton.textContent = `Git diff${counts.diff > 0 ? ` (${counts.diff})` : ""}`;
   scopeLastCommitButton.textContent = `Last commit${counts.lastCommit > 0 ? ` (${counts.lastCommit})` : ""}`;
   scopeAllButton.textContent = `All files${counts.all > 0 ? ` (${counts.all})` : ""}`;
 
+  applyButtonClasses(scopeBranchButton, state.currentScope === "branch-diff", counts.branch === 0);
   applyButtonClasses(scopeDiffButton, state.currentScope === "git-diff", counts.diff === 0);
   applyButtonClasses(scopeLastCommitButton, state.currentScope === "last-commit", counts.lastCommit === 0);
   applyButtonClasses(scopeAllButton, state.currentScope === "all-files", counts.all === 0);
@@ -689,6 +734,7 @@ function showFileCommentModal() {
         id: `${Date.now()}:${Math.random().toString(16).slice(2)}`,
         fileId: file.id,
         scope: state.currentScope,
+        branch: state.currentScope === "branch-diff" ? state.selectedBranch : null,
         side: "file",
         startLine: null,
         endLine: null,
@@ -769,7 +815,7 @@ function syncViewZones() {
 
   const originalEditor = diffEditor.getOriginalEditor();
   const modifiedEditor = diffEditor.getModifiedEditor();
-  const inlineComments = state.comments.filter((comment) => comment.fileId === file.id && comment.scope === state.currentScope && comment.side !== "file");
+  const inlineComments = state.comments.filter((comment) => comment.fileId === file.id && commentMatchesScope(comment) && comment.side !== "file");
 
   inlineComments.forEach((item) => {
     const editor = item.side === "original" ? originalEditor : modifiedEditor;
@@ -793,7 +839,7 @@ function syncViewZones() {
 function updateDecorations() {
   if (!diffEditor || !monacoApi) return;
   const file = activeFile();
-  const comments = file ? state.comments.filter((comment) => comment.fileId === file.id && comment.scope === state.currentScope && comment.side !== "file") : [];
+  const comments = file ? state.comments.filter((comment) => comment.fileId === file.id && commentMatchesScope(comment) && comment.side !== "file") : [];
   const originalRanges = [];
   const modifiedRanges = [];
 
@@ -822,7 +868,7 @@ function renderFileComments() {
     return;
   }
 
-  const fileComments = state.comments.filter((comment) => comment.fileId === file.id && comment.scope === state.currentScope && comment.side === "file");
+  const fileComments = state.comments.filter((comment) => comment.fileId === file.id && commentMatchesScope(comment) && comment.side === "file");
 
   if (fileComments.length === 0) {
     fileCommentsContainer.className = "hidden overflow-hidden px-0 py-0";
@@ -946,6 +992,7 @@ function createGlyphHoverActions(editor, side) {
       id: `${Date.now()}:${Math.random().toString(16).slice(2)}`,
       fileId: file.id,
       scope: state.currentScope,
+      branch: state.currentScope === "branch-diff" ? state.selectedBranch : null,
       side,
       startLine: line,
       endLine: line,
@@ -994,7 +1041,7 @@ function createGlyphHoverActions(editor, side) {
 
 window.__reviewReceive = function (message) {
   if (!message || typeof message !== "object") return;
-  const key = cacheKey(message.scope, message.fileId);
+  const key = cacheKey(message.scope, message.fileId, message.branch);
 
   if (message.type === "file-data") {
     state.fileContents[key] = {
@@ -1004,7 +1051,7 @@ window.__reviewReceive = function (message) {
     delete state.fileErrors[key];
     delete state.pendingRequestIds[key];
     renderTree();
-    if (state.activeFileId === message.fileId && state.currentScope === message.scope) {
+    if (state.activeFileId === message.fileId && state.currentScope === message.scope && scopeBranchKey(message.scope) === (message.branch || "")) {
       mountFile({ restoreFileScroll: true });
     }
     return;
@@ -1014,7 +1061,7 @@ window.__reviewReceive = function (message) {
     state.fileErrors[key] = message.message || "Unknown error";
     delete state.pendingRequestIds[key];
     renderTree();
-    if (state.activeFileId === message.fileId && state.currentScope === message.scope) {
+    if (state.activeFileId === message.fileId && state.currentScope === message.scope && scopeBranchKey(message.scope) === (message.branch || "")) {
       mountFile({ preserveScroll: false });
     }
   }
@@ -1081,6 +1128,7 @@ function setupMonaco() {
 
 function switchScope(scope) {
   const hasScopeFiles = {
+    "branch-diff": state.selectedBranch ? reviewData.files.some((file) => file.inBranchDiffs?.[state.selectedBranch]) : false,
     "git-diff": reviewData.files.some((file) => file.inGitDiff),
     "last-commit": reviewData.files.some((file) => file.inLastCommit),
     "all-files": reviewData.files.some((file) => file.hasWorkingTreeFile),
@@ -1156,6 +1204,32 @@ toggleReviewedButton.addEventListener("click", () => {
   updateToggleButtons();
 });
 
+branchComparisonSelect.addEventListener("change", () => {
+  saveCurrentScrollPosition();
+  state.selectedBranch = branchComparisonSelect.value || null;
+  if (state.selectedBranch) {
+    if (state.currentScope === "branch-diff") {
+      renderAll({ restoreFileScroll: true });
+      const file = activeFile();
+      if (file) ensureFileLoaded(file.id, state.currentScope);
+    } else {
+      const previousScope = state.currentScope;
+      switchScope("branch-diff");
+      if (state.currentScope === previousScope) {
+        renderAll({ restoreFileScroll: true });
+      }
+    }
+  } else if (state.currentScope === "branch-diff") {
+    switchScope(reviewData.files.some((file) => file.inGitDiff) ? "git-diff" : reviewData.files.some((file) => file.inLastCommit) ? "last-commit" : "all-files");
+  } else {
+    renderAll({ restoreFileScroll: true });
+  }
+});
+
+scopeBranchButton.addEventListener("click", () => {
+  switchScope("branch-diff");
+});
+
 scopeDiffButton.addEventListener("click", () => {
   switchScope("git-diff");
 });
@@ -1195,6 +1269,7 @@ sidebarSearchInputEl.addEventListener("keydown", (event) => {
   }
 });
 
+setupBranchComparisonSelect();
 ensureActiveFileForScope();
 renderTree();
 renderFileComments();
