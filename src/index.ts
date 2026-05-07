@@ -1,5 +1,5 @@
 import { readdirSync, statSync } from "node:fs";
-import { appendFile } from "node:fs/promises";
+import { appendFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import type { GlimpseWindow } from "glimpseui";
@@ -56,6 +56,14 @@ function isAiChatPayload(value: ReviewWindowMessage): value is ReviewAiChatPaylo
 }
 
 const LOG_PATH = "/tmp/pi-diff-review.log";
+const MAX_CHAT_CONTEXT_FILES = 6;
+const MAX_CHAT_CONTEXT_FILE_CHARS = 12_000;
+const MAX_CHAT_CONTEXT_TOTAL_CHARS = 48_000;
+const MAX_CHAT_CONTEXT_FILE_BYTES = 180_000;
+
+const CHAT_CONTEXT_BINARY_EXTENSIONS = new Set([
+  ".7z", ".a", ".avi", ".avif", ".bin", ".bmp", ".class", ".dll", ".dylib", ".eot", ".exe", ".gif", ".gz", ".ico", ".jar", ".jpeg", ".jpg", ".lock", ".lockb", ".map", ".mov", ".mp3", ".mp4", ".o", ".otf", ".pdf", ".png", ".pyc", ".so", ".svgz", ".tar", ".ttf", ".wasm", ".webm", ".webp", ".woff", ".woff2", ".zip",
+]);
 
 function escapeForInlineScript(value: string): string {
   return value.replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
@@ -113,6 +121,188 @@ function ensureGlimpseDisplayEnvironment(): void {
   if (detectedWaylandDisplay) {
     process.env.WAYLAND_DISPLAY = detectedWaylandDisplay;
   }
+}
+
+function parseGitPathList(output: string): string[] {
+  return output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
+function fileExtension(path: string): string {
+  const fileName = path.toLowerCase().split("/").pop() ?? path.toLowerCase();
+  const dotIndex = fileName.lastIndexOf(".");
+  return dotIndex < 0 ? "" : fileName.slice(dotIndex);
+}
+
+function isLikelyTextProjectPath(path: string): boolean {
+  const lower = path.toLowerCase();
+  if (lower.includes("/.git/") || lower.includes("/node_modules/") || lower.includes("/vendor/bundle/")) return false;
+  if (lower.endsWith("package-lock.json") || lower.endsWith("pnpm-lock.yaml") || lower.endsWith("yarn.lock") || lower.endsWith("gemfile.lock")) return false;
+  return !CHAT_CONTEXT_BINARY_EXTENSIONS.has(fileExtension(path));
+}
+
+function camelToSnake(value: string): string {
+  return value
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1_$2")
+    .replace(/([a-z\d])([A-Z])/g, "$1_$2")
+    .replace(/[-\s]+/g, "_")
+    .toLowerCase();
+}
+
+function namespacePath(symbol: string): string {
+  return symbol.split("::").map(camelToSnake).join("/");
+}
+
+function extractExplicitPathHints(value: string): string[] {
+  const hints = new Set<string>();
+  const addHint = (candidate: string): void => {
+    const cleaned = candidate.trim().replace(/^['"`]+|['"`,.:;]+$/g, "");
+    if (cleaned.length < 3 || cleaned.length > 220) return;
+    if (!/[/.]/.test(cleaned)) return;
+    if (/^https?:\/\//i.test(cleaned)) return;
+    hints.add(cleaned);
+  };
+
+  for (const match of value.matchAll(/`([^`\n]+)`/g)) addHint(match[1]);
+  for (const match of value.matchAll(/(?:^|\s)([\w@./-]+\.[A-Za-z0-9]{1,8})(?=\s|$|[),.;:])/g)) addHint(match[1]);
+  return [...hints];
+}
+
+function extractNamespaceSymbols(value: string): string[] {
+  return [...new Set([...value.matchAll(/\b[A-Z][A-Za-z0-9]*(?:::[A-Z][A-Za-z0-9]*)+\b/g)].map((match) => match[0]))];
+}
+
+function extractQuestionClassWords(value: string): string[] {
+  return [...new Set([...value.matchAll(/\b[A-Z][A-Za-z0-9]{2,}\b/g)].map((match) => match[0]))]
+    .filter((word) => !["AI", "API", "HTTP", "JSON", "URL", "ID"].includes(word));
+}
+
+function scoreProjectPath(path: string, activePath: string | null, explicitHints: string[], namespaceSymbols: string[], classWords: string[]): number {
+  if (!isLikelyTextProjectPath(path)) return 0;
+  if (activePath != null && path === activePath) return 0;
+
+  const lowerPath = path.toLowerCase();
+  let score = 0;
+
+  for (const hint of explicitHints) {
+    const normalized = hint.replace(/^\.\//, "").toLowerCase();
+    if (lowerPath === normalized) score += 1200;
+    else if (lowerPath.endsWith(`/${normalized}`) || lowerPath.includes(normalized)) score += 800;
+  }
+
+  for (const symbol of namespaceSymbols) {
+    const namespacedPath = namespacePath(symbol);
+    const parts = namespacedPath.split("/");
+    const lastPart = parts[parts.length - 1] ?? "";
+    if (lowerPath.includes(namespacedPath)) score += 1200;
+    if (lowerPath.endsWith(`${namespacedPath}.rb`) || lowerPath.endsWith(`${namespacedPath}.ts`) || lowerPath.endsWith(`${namespacedPath}.js`)) score += 400;
+    if (parts.length > 1 && parts.every((part) => lowerPath.includes(part))) score += 500;
+    if (lastPart && lowerPath.split("/").pop()?.startsWith(lastPart)) score += 80;
+  }
+
+  for (const word of classWords) {
+    const snake = camelToSnake(word);
+    const fileName = lowerPath.split("/").pop() ?? lowerPath;
+    if (fileName.startsWith(snake)) score += 120;
+  }
+
+  return score;
+}
+
+async function listProjectFiles(pi: ExtensionAPI, repoRoot: string): Promise<string[]> {
+  const tracked = await pi.exec("git", ["ls-files", "--cached"], { cwd: repoRoot });
+  const untracked = await pi.exec("git", ["ls-files", "--others", "--exclude-standard"], { cwd: repoRoot });
+  return [...new Set([
+    ...(tracked.code === 0 ? parseGitPathList(tracked.stdout) : []),
+    ...(untracked.code === 0 ? parseGitPathList(untracked.stdout) : []),
+  ])];
+}
+
+async function readProjectTextFile(repoRoot: string, path: string): Promise<string | null> {
+  try {
+    const fullPath = join(repoRoot, path);
+    const stats = statSync(fullPath);
+    if (!stats.isFile() || stats.size > MAX_CHAT_CONTEXT_FILE_BYTES) return null;
+    return await readFile(fullPath, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function scoreProjectContent(content: string, namespaceSymbols: string[], classWords: string[]): number {
+  let score = 0;
+  for (const symbol of namespaceSymbols) {
+    if (content.includes(symbol)) score += 800;
+    const parts = symbol.split("::");
+    const lastPart = parts[parts.length - 1] ?? "";
+    if (lastPart && new RegExp(`\\b(class|module)\\s+${lastPart}\\b`).test(content)) score += 300;
+    if (parts.every((part) => content.includes(part))) score += 250;
+  }
+  for (const word of classWords) {
+    if (new RegExp(`\\b(class|module)\\s+${word}\\b`).test(content)) score += 220;
+  }
+  return score;
+}
+
+function formatProjectContextFile(path: string, content: string): string {
+  const truncated = content.length > MAX_CHAT_CONTEXT_FILE_CHARS
+    ? `${content.slice(0, MAX_CHAT_CONTEXT_FILE_CHARS)}\n\n[... ${content.length - MAX_CHAT_CONTEXT_FILE_CHARS} characters omitted ...]`
+    : content;
+  return [`### ${path}`, "```", truncated, "```"].join("\n");
+}
+
+async function buildProjectChatContext(pi: ExtensionAPI, repoRoot: string, activeFile: ReviewFile | null, activeContents: ReviewFileContents | null, question: string, contextMarkdown: string): Promise<string> {
+  const activePath = activeFile?.path ?? null;
+  const searchText = [question, contextMarkdown, activeContents?.modifiedContent ?? "", activeContents?.originalContent ?? ""].join("\n");
+  const explicitHints = extractExplicitPathHints(question);
+  const namespaceSymbols = extractNamespaceSymbols(searchText).slice(0, 12);
+  const classWords = extractQuestionClassWords(question).slice(0, 8);
+
+  if (explicitHints.length === 0 && namespaceSymbols.length === 0 && classWords.length === 0) return "";
+
+  const projectFiles = await listProjectFiles(pi, repoRoot);
+  const scoredByPath = projectFiles
+    .map((path) => ({ path, score: scoreProjectPath(path, activePath, explicitHints, namespaceSymbols, classWords) }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 16);
+
+  const candidates = new Map<string, { path: string; score: number; content: string }>();
+  for (const entry of scoredByPath) {
+    const content = await readProjectTextFile(repoRoot, entry.path);
+    if (content != null) candidates.set(entry.path, { ...entry, content });
+  }
+
+  const contentSearchFiles = projectFiles
+    .filter((path) => !candidates.has(path))
+    .filter((path) => isLikelyTextProjectPath(path))
+    .filter((path) => activePath == null || path !== activePath)
+    .slice(0, 600);
+
+  for (const path of contentSearchFiles) {
+    if (candidates.size >= 24) break;
+    const content = await readProjectTextFile(repoRoot, path);
+    if (content == null) continue;
+    const score = scoreProjectContent(content, namespaceSymbols, classWords);
+    if (score > 0) candidates.set(path, { path, score, content });
+  }
+
+  const selected = [...candidates.values()]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, MAX_CHAT_CONTEXT_FILES);
+
+  const sections: string[] = [];
+  let totalChars = 0;
+  for (const item of selected) {
+    const section = formatProjectContextFile(item.path, item.content);
+    if (totalChars + section.length > MAX_CHAT_CONTEXT_TOTAL_CHARS) break;
+    sections.push(section);
+    totalChars += section.length;
+  }
+
+  return sections.length === 0 ? "" : sections.join("\n\n");
 }
 
 export default function (pi: ExtensionAPI) {
@@ -364,6 +554,8 @@ export default function (pi: ExtensionAPI) {
 
       try {
         const contents = file == null ? null : await loadContents(file, message.scope, message.branch);
+        const projectContextMarkdown = await buildProjectChatContext(pi, repoRoot, file, contents, message.question, message.contextMarkdown);
+        await logReview("debug", "project chat context loaded", { requestId: message.requestId, chars: projectContextMarkdown.length });
         const markdown = await answerReviewQuestion(ctx, {
           repoRoot,
           file,
@@ -371,6 +563,7 @@ export default function (pi: ExtensionAPI) {
           branch: message.branch,
           contents,
           contextMarkdown: message.contextMarkdown,
+          projectContextMarkdown,
           messages: message.messages,
           question: message.question,
         });

@@ -70,7 +70,7 @@ function fenceLanguage(path: string): string {
   if (lower.endsWith(".json")) return "json";
   if (lower.endsWith(".md")) return "md";
   if (lower.endsWith(".css")) return "css";
-  if (lower.endsWith(".html")) return "html";
+  if (lower.endsWith(".html") || lower.endsWith(".erb")) return "html";
   if (lower.endsWith(".sh")) return "sh";
   if (lower.endsWith(".yml") || lower.endsWith(".yaml")) return "yaml";
   if (lower.endsWith(".rs")) return "rust";
@@ -78,6 +78,7 @@ function fenceLanguage(path: string): string {
   if (lower.endsWith(".kt")) return "kotlin";
   if (lower.endsWith(".py")) return "python";
   if (lower.endsWith(".go")) return "go";
+  if (lower.endsWith(".rb") || lower.endsWith(".rake") || lower.endsWith(".gemspec") || lower.endsWith("/gemfile") || lower.endsWith("/rakefile") || lower.endsWith("/capfile") || lower.endsWith("/guardfile") || lower.endsWith("/config.ru") || lower === "gemfile" || lower === "rakefile" || lower === "capfile" || lower === "guardfile" || lower === "config.ru") return "ruby";
   return "";
 }
 
@@ -185,6 +186,7 @@ function buildChatPrompt(options: {
   branch: string | null;
   contents: ReviewFileContents | null;
   contextMarkdown: string;
+  projectContextMarkdown: string;
   messages: ReviewChatMessage[];
   question: string;
 }): string {
@@ -205,6 +207,9 @@ function buildChatPrompt(options: {
     "",
     `Current file context:`,
     fileSection,
+    "",
+    `Additional project context:`,
+    options.projectContextMarkdown || "No additional project files were loaded for this question.",
     "",
     `Conversation so far:`,
     history || "No previous chat messages.",
@@ -280,6 +285,7 @@ export async function answerReviewQuestion(
     branch: string | null;
     contents: ReviewFileContents | null;
     contextMarkdown: string;
+    projectContextMarkdown: string;
     messages: ReviewChatMessage[];
     question: string;
   },

@@ -138,12 +138,13 @@ function escapeHtml(value) {
 function inferLanguage(path) {
   if (!path) return "plaintext";
   const lower = path.toLowerCase();
+  const fileName = lower.split("/").pop() || lower;
   if (lower.endsWith(".ts") || lower.endsWith(".tsx")) return "typescript";
   if (lower.endsWith(".js") || lower.endsWith(".jsx") || lower.endsWith(".mjs") || lower.endsWith(".cjs")) return "javascript";
   if (lower.endsWith(".json")) return "json";
   if (lower.endsWith(".md")) return "markdown";
   if (lower.endsWith(".css")) return "css";
-  if (lower.endsWith(".html")) return "html";
+  if (lower.endsWith(".html") || lower.endsWith(".erb")) return "html";
   if (lower.endsWith(".sh")) return "shell";
   if (lower.endsWith(".yml") || lower.endsWith(".yaml")) return "yaml";
   if (lower.endsWith(".rs")) return "rust";
@@ -151,7 +152,79 @@ function inferLanguage(path) {
   if (lower.endsWith(".kt")) return "kotlin";
   if (lower.endsWith(".py")) return "python";
   if (lower.endsWith(".go")) return "go";
+  if (lower.endsWith(".rb") || lower.endsWith(".rake") || lower.endsWith(".gemspec") || fileName === "gemfile" || fileName === "rakefile" || fileName === "capfile" || fileName === "guardfile" || fileName === "config.ru") return "ruby";
   return "plaintext";
+}
+
+function registerRubyLanguage() {
+  const languages = monacoApi.languages.getLanguages();
+  if (!languages.some((language) => language.id === "ruby")) {
+    monacoApi.languages.register({
+      id: "ruby",
+      extensions: [".rb", ".rake", ".gemspec"],
+      filenames: ["Gemfile", "Rakefile", "Capfile", "Guardfile", "config.ru"],
+      aliases: ["Ruby", "ruby"],
+    });
+  }
+
+  monacoApi.languages.setLanguageConfiguration("ruby", {
+    comments: { lineComment: "#", blockComment: ["=begin", "=end"] },
+    brackets: [["{", "}"], ["[", "]"], ["(", ")"]],
+    autoClosingPairs: [
+      { open: "{", close: "}" },
+      { open: "[", close: "]" },
+      { open: "(", close: ")" },
+      { open: '"', close: '"' },
+      { open: "'", close: "'" },
+    ],
+    surroundingPairs: [
+      { open: "{", close: "}" },
+      { open: "[", close: "]" },
+      { open: "(", close: ")" },
+      { open: '"', close: '"' },
+      { open: "'", close: "'" },
+    ],
+  });
+
+  monacoApi.languages.setMonarchTokensProvider("ruby", {
+    defaultToken: "",
+    tokenPostfix: ".ruby",
+    keywords: [
+      "BEGIN", "END", "alias", "and", "begin", "break", "case", "class", "def", "defined", "do", "else", "elsif", "end", "ensure", "false", "for", "if", "in", "module", "next", "nil", "not", "or", "redo", "rescue", "retry", "return", "self", "super", "then", "true", "undef", "unless", "until", "when", "while", "yield",
+    ],
+    builtins: ["Array", "Hash", "String", "Symbol", "Integer", "Float", "Numeric", "Object", "Class", "Module", "Kernel", "Enumerable", "raise", "puts", "print", "require", "include", "extend", "attr_reader", "attr_writer", "attr_accessor", "private", "protected", "public"],
+    tokenizer: {
+      root: [
+        [/#[^\\r\\n]*/, "comment"],
+        [/=begin/, "comment", "@comment"],
+        [/[A-Z][\\w]*(?:::[A-Z][\\w]*)*/, "type.identifier"],
+        [/[a-zA-Z_]\\w*[!?=]?/, { cases: { "@keywords": "keyword", "@builtins": "predefined", "@default": "identifier" } }],
+        [/@{1,2}[a-zA-Z_]\\w*/, "variable"],
+        [/:[a-zA-Z_]\\w*[!?=]?/, "string.symbol"],
+        [/\\d+(?:_\\d+)*(?:\\.\\d+(?:_\\d+)*)?/, "number"],
+        [/"/, "string", "@doubleString"],
+        [/'/, "string", "@singleString"],
+        [/[{}()\[\]]/, "@brackets"],
+        [/[;,.]/, "delimiter"],
+        [/[+\-*\/%=<>!&|^~]+/, "operator"],
+      ],
+      comment: [
+        [/=end/, "comment", "@pop"],
+        [/.*$/, "comment"],
+      ],
+      doubleString: [
+        [/[^\\\\"#]+/, "string"],
+        [/#[{][^}]*[}]/, "string.interpolated"],
+        [/\\\\./, "string.escape"],
+        [/"/, "string", "@pop"],
+      ],
+      singleString: [
+        [/[^\\\\']+/, "string"],
+        [/\\\\./, "string.escape"],
+        [/'/, "string", "@pop"],
+      ],
+    },
+  });
 }
 
 function selectedBranchComparison() {
@@ -1518,6 +1591,7 @@ function setupMonaco() {
 
   window.require(["vs/editor/editor.main"], function () {
     monacoApi = window.monaco;
+    registerRubyLanguage();
 
     monacoApi.editor.defineTheme("review-dark", {
       base: "vs-dark",
