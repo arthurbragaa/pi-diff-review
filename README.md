@@ -23,7 +23,11 @@ The command:
 5. shows git status markers in the sidebar for changed files and untracked files
 6. lazy-loads file contents on demand as you switch files and scopes
 7. lets you draft comments on the original side, modified side, or whole file
-8. inserts the resulting feedback prompt into the pi editor when you submit
+8. explains the current file or selected lines using the active pi model
+9. lets you add explanations to the overall note or as review comments
+10. inserts the resulting feedback prompt into the pi editor when you submit
+
+Troubleshooting logs are written to `/tmp/pi-diff-review.log`. Use `/diff-review-log` to insert the latest log tail into the pi editor.
 
 ## Requirements
 

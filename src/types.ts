@@ -62,7 +62,33 @@ export interface ReviewRequestFilePayload {
   branch: string | null;
 }
 
-export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload | ReviewRequestFilePayload;
+export interface ReviewExplainFilePayload {
+  type: "explain-file";
+  requestId: string;
+  fileId: string;
+  scope: ReviewScope;
+  branch: string | null;
+}
+
+export interface ReviewExplainSelectionPayload {
+  type: "explain-selection";
+  requestId: string;
+  fileId: string;
+  scope: ReviewScope;
+  branch: string | null;
+  side: "original" | "modified";
+  startLine: number;
+  endLine: number;
+}
+
+export interface ReviewClientLogPayload {
+  type: "client-log";
+  level: "debug" | "info" | "warn" | "error";
+  message: string;
+  details?: unknown;
+}
+
+export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload | ReviewRequestFilePayload | ReviewExplainFilePayload | ReviewExplainSelectionPayload | ReviewClientLogPayload;
 
 export interface ReviewFileDataMessage {
   type: "file-data";
@@ -83,7 +109,27 @@ export interface ReviewFileErrorMessage {
   message: string;
 }
 
-export type ReviewHostMessage = ReviewFileDataMessage | ReviewFileErrorMessage;
+export interface ReviewExplanationDataMessage {
+  type: "explanation-data";
+  requestId: string;
+  fileId: string;
+  scope: ReviewScope;
+  branch: string | null;
+  title: string;
+  markdown: string;
+}
+
+export interface ReviewExplanationErrorMessage {
+  type: "explanation-error";
+  requestId: string;
+  fileId: string;
+  scope: ReviewScope;
+  branch: string | null;
+  title: string;
+  message: string;
+}
+
+export type ReviewHostMessage = ReviewFileDataMessage | ReviewFileErrorMessage | ReviewExplanationDataMessage | ReviewExplanationErrorMessage;
 
 export interface BranchComparison {
   branch: string;

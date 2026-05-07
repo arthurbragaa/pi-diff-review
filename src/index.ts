@@ -1,13 +1,18 @@
 import { readdirSync, statSync } from "node:fs";
+import { appendFile, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
 import { open, type GlimpseWindow } from "glimpseui";
+import { explainReviewFile, explanationTitle, type ExplanationSelection } from "./explain.js";
 import { getReviewWindowData, loadReviewFileContents } from "./git.js";
 import { composeReviewPrompt } from "./prompt.js";
 import { loadReviewedFiles, saveReviewedFiles } from "./review-state.js";
 import type {
   ReviewCancelPayload,
+  ReviewClientLogPayload,
+  ReviewExplainFilePayload,
+  ReviewExplainSelectionPayload,
   ReviewFile,
   ReviewFileContents,
   ReviewHostMessage,
@@ -29,10 +34,44 @@ function isRequestFilePayload(value: ReviewWindowMessage): value is ReviewReques
   return value.type === "request-file";
 }
 
+function isExplainFilePayload(value: ReviewWindowMessage): value is ReviewExplainFilePayload {
+  return value.type === "explain-file";
+}
+
+function isExplainSelectionPayload(value: ReviewWindowMessage): value is ReviewExplainSelectionPayload {
+  return value.type === "explain-selection";
+}
+
+function isClientLogPayload(value: ReviewWindowMessage): value is ReviewClientLogPayload {
+  return value.type === "client-log";
+}
+
+const LOG_PATH = "/tmp/pi-diff-review.log";
+
 type WaitingEditorResult = "escape" | "window-settled";
 
 function escapeForInlineScript(value: string): string {
   return value.replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+async function logReview(level: "debug" | "info" | "warn" | "error", message: string, details?: unknown): Promise<void> {
+  const line = `${new Date().toISOString()} ${level.toUpperCase()} ${message}${details === undefined ? "" : ` ${safeJson(details)}`}\n`;
+  try {
+    await appendFile(LOG_PATH, line, "utf8");
+  } catch {}
+}
+
+function tailText(value: string, maxLines: number): string {
+  const lines = value.split(/\r?\n/);
+  return lines.slice(Math.max(0, lines.length - maxLines)).join("\n").trim();
 }
 
 function waylandSocketExists(display: string): boolean {
@@ -154,13 +193,17 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function reviewRepository(ctx: ExtensionCommandContext): Promise<void> {
+    await logReview("info", "diff-review command started", { cwd: ctx.cwd, model: ctx.model == null ? null : `${ctx.model.provider}/${ctx.model.id}` });
     if (activeWindow != null) {
+      await logReview("warn", "diff-review command rejected because window is already open");
       ctx.ui.notify("A review window is already open.", "warning");
       return;
     }
 
     const { repoRoot, files, branchComparisons } = await getReviewWindowData(pi, ctx.cwd);
+    await logReview("info", "review data loaded", { repoRoot, files: files.length, branchComparisons: branchComparisons.map((item) => item.branch) });
     if (files.length === 0) {
+      await logReview("info", "no reviewable files found", { repoRoot });
       ctx.ui.notify("No reviewable files found.", "info");
       return;
     }
@@ -174,6 +217,7 @@ export default function (pi: ExtensionAPI) {
       title: "pi review",
     });
     activeWindow = window;
+    await logReview("info", "native review window opened", { logPath: LOG_PATH });
 
     const waitingUI = showWaitingUI(ctx);
     const fileMap = new Map(files.map((file) => [file.id, file]));
@@ -221,8 +265,10 @@ export default function (pi: ExtensionAPI) {
         };
 
         const handleRequestFile = async (message: ReviewRequestFilePayload): Promise<void> => {
+          await logReview("debug", "window requested file", { fileId: message.fileId, scope: message.scope, branch: message.branch });
           const file = fileMap.get(message.fileId);
           if (file == null) {
+            await logReview("warn", "window requested unknown file", { fileId: message.fileId });
             sendWindowMessage({
               type: "file-error",
               requestId: message.requestId,
@@ -236,6 +282,7 @@ export default function (pi: ExtensionAPI) {
 
           try {
             const contents = await loadContents(file, message.scope, message.branch);
+            await logReview("debug", "file contents loaded", { path: file.path, scope: message.scope, originalChars: contents.originalContent.length, modifiedChars: contents.modifiedContent.length });
             sendWindowMessage({
               type: "file-data",
               requestId: message.requestId,
@@ -247,6 +294,7 @@ export default function (pi: ExtensionAPI) {
             });
           } catch (error) {
             const messageText = error instanceof Error ? error.message : String(error);
+            await logReview("error", "file contents failed", { fileId: message.fileId, scope: message.scope, message: messageText });
             sendWindowMessage({
               type: "file-error",
               requestId: message.requestId,
@@ -258,22 +306,83 @@ export default function (pi: ExtensionAPI) {
           }
         };
 
+        const handleExplain = async (message: ReviewExplainFilePayload | ReviewExplainSelectionPayload): Promise<void> => {
+          await logReview("info", "window requested explanation", message);
+          const file = fileMap.get(message.fileId);
+          const selection: ExplanationSelection | null = isExplainSelectionPayload(message)
+            ? { side: message.side, startLine: message.startLine, endLine: message.endLine }
+            : null;
+          const title = file == null ? "Explanation" : explanationTitle(file, selection);
+
+          if (file == null) {
+            await logReview("warn", "window requested explanation for unknown file", { fileId: message.fileId });
+            sendWindowMessage({
+              type: "explanation-error",
+              requestId: message.requestId,
+              fileId: message.fileId,
+              scope: message.scope,
+              branch: message.branch,
+              title,
+              message: "Unknown file requested.",
+            });
+            return;
+          }
+
+          try {
+            const contents = await loadContents(file, message.scope, message.branch);
+            const markdown = await explainReviewFile(ctx, file, message.scope, message.branch, contents, selection);
+            await logReview("info", "explanation generated", { path: file.path, requestId: message.requestId, chars: markdown.length });
+            sendWindowMessage({
+              type: "explanation-data",
+              requestId: message.requestId,
+              fileId: message.fileId,
+              scope: message.scope,
+              branch: message.branch,
+              title,
+              markdown,
+            });
+          } catch (error) {
+            const messageText = error instanceof Error ? error.message : String(error);
+            await logReview("error", "explanation failed", { requestId: message.requestId, fileId: message.fileId, title, message: messageText });
+            sendWindowMessage({
+              type: "explanation-error",
+              requestId: message.requestId,
+              fileId: message.fileId,
+              scope: message.scope,
+              branch: message.branch,
+              title,
+              message: messageText,
+            });
+          }
+        };
+
         const onMessage = (data: unknown): void => {
           const message = data as ReviewWindowMessage;
+          if (isClientLogPayload(message)) {
+            void logReview(message.level, `client: ${message.message}`, message.details);
+            return;
+          }
           if (isRequestFilePayload(message)) {
             void handleRequestFile(message);
             return;
           }
+          if (isExplainFilePayload(message) || isExplainSelectionPayload(message)) {
+            void handleExplain(message);
+            return;
+          }
           if (isSubmitPayload(message) || isCancelPayload(message)) {
+            void logReview("info", `window ${message.type}`);
             settle(message);
           }
         };
 
         const onClosed = (): void => {
+          void logReview("info", "native review window closed");
           settle(null);
         };
 
         const onError = (error: Error): void => {
+          void logReview("error", "native review window error", { message: error.message, stack: error.stack });
           if (settled) return;
           settled = true;
           cleanup();
@@ -323,6 +432,7 @@ export default function (pi: ExtensionAPI) {
       activeWaitingUIDismiss?.();
       closeActiveWindow();
       const message = error instanceof Error ? error.message : String(error);
+      await logReview("error", "review failed", { message, stack: error instanceof Error ? error.stack : undefined });
       ctx.ui.notify(`Review failed: ${message}`, "error");
     }
   }
@@ -331,6 +441,21 @@ export default function (pi: ExtensionAPI) {
     description: "Open a native review window with git diff, last commit, all files, and optional main/master comparison scopes",
     handler: async (_args, ctx) => {
       await reviewRepository(ctx);
+    },
+  });
+
+  pi.registerCommand("diff-review-log", {
+    description: "Insert the tail of the pi diff review log into the editor",
+    handler: async (args, ctx) => {
+      const maxLines = Number.parseInt(args.trim(), 10) || 120;
+      try {
+        const log = await readFile(LOG_PATH, "utf8");
+        ctx.ui.setEditorText(tailText(log, Math.max(20, Math.min(500, maxLines))));
+        ctx.ui.notify(`Inserted ${LOG_PATH} into the editor.`, "info");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(`No diff review log found at ${LOG_PATH}: ${message}`, "warning");
+      }
     },
   });
 

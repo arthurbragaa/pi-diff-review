@@ -21,6 +21,14 @@ const state = {
   fileContents: {},
   fileErrors: {},
   pendingRequestIds: {},
+  explanation: {
+    status: "idle",
+    requestId: null,
+    title: "No explanation yet",
+    markdown: "",
+    error: "",
+    source: null,
+  },
 };
 
 const sidebarEl = document.getElementById("sidebar");
@@ -48,9 +56,40 @@ const fileCommentButton = document.getElementById("file-comment-button");
 const toggleReviewedButton = document.getElementById("toggle-reviewed-button");
 const toggleUnchangedButton = document.getElementById("toggle-unchanged-button");
 const toggleWrapButton = document.getElementById("toggle-wrap-button");
+const explanationTitleEl = document.getElementById("explanation-title");
+const explanationStatusEl = document.getElementById("explanation-status");
+const explanationOutputEl = document.getElementById("explanation-output");
+const explainFileButton = document.getElementById("explain-file-button");
+const explainSelectionButton = document.getElementById("explain-selection-button");
+const explanationAddCommentButton = document.getElementById("explanation-add-comment-button");
+const explanationAddOverallButton = document.getElementById("explanation-add-overall-button");
 
 repoRootEl.textContent = reviewData.repoRoot || "";
 windowTitleEl.textContent = "Review";
+
+function sendClientLog(level, message, details) {
+  try {
+    if (window.glimpse?.send) {
+      window.glimpse.send({ type: "client-log", level, message, details });
+    }
+  } catch {}
+}
+
+window.addEventListener("error", (event) => {
+  sendClientLog("error", "window error", {
+    message: event.message,
+    source: event.filename,
+    line: event.lineno,
+    column: event.colno,
+    error: event.error?.stack || String(event.error || ""),
+  });
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  sendClientLog("error", "unhandled rejection", {
+    reason: event.reason?.stack || String(event.reason || ""),
+  });
+});
 
 let monacoApi = null;
 let diffEditor = null;
@@ -474,6 +513,204 @@ function ensureFileLoaded(fileId, scope = state.currentScope) {
   }
 }
 
+function setExplanation(next) {
+  state.explanation = { ...state.explanation, ...next };
+  renderExplanationPanel();
+}
+
+function explanationStatusClass(status) {
+  switch (status) {
+    case "loading": return "shrink-0 rounded-full border border-[#58a6ff]/40 bg-[#58a6ff]/10 px-2 py-0.5 text-[10px] font-medium text-[#58a6ff]";
+    case "ready": return "shrink-0 rounded-full border border-[#2ea043]/40 bg-[#238636]/15 px-2 py-0.5 text-[10px] font-medium text-[#3fb950]";
+    case "error": return "shrink-0 rounded-full border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-[10px] font-medium text-red-400";
+    default: return "shrink-0 rounded-full border border-review-border px-2 py-0.5 text-[10px] font-medium text-review-muted";
+  }
+}
+
+function renderExplanationPanel() {
+  const file = activeFile();
+  const busy = state.explanation.status === "loading";
+  const fileReady = file != null && isActiveFileReady();
+  explainFileButton.disabled = !file || !fileReady || busy;
+  explainSelectionButton.disabled = !file || !fileReady || busy;
+  explanationAddCommentButton.disabled = !state.explanation.markdown || busy;
+  explanationAddOverallButton.disabled = !state.explanation.markdown || busy;
+
+  explanationTitleEl.textContent = state.explanation.title || "No explanation yet";
+  explanationStatusEl.textContent = state.explanation.status === "loading"
+    ? "Thinking"
+    : state.explanation.status === "ready"
+      ? "Ready"
+      : state.explanation.status === "error"
+        ? "Error"
+        : "Idle";
+  explanationStatusEl.className = explanationStatusClass(state.explanation.status);
+
+  if (state.explanation.status === "loading") {
+    explanationOutputEl.textContent = "Asking the current pi model to explain this...";
+  } else if (state.explanation.status === "error") {
+    explanationOutputEl.textContent = state.explanation.error || "Unable to generate an explanation.";
+  } else if (state.explanation.markdown) {
+    explanationOutputEl.textContent = state.explanation.markdown;
+  } else if (!file) {
+    explanationOutputEl.textContent = "Pick a file, then ask for an explanation.";
+  } else if (!fileReady) {
+    explanationOutputEl.textContent = "File contents are still loading.";
+  } else {
+    explanationOutputEl.textContent = "Use Explain file or select lines in the editor and use Explain selection.";
+  }
+}
+
+function selectionHasRange(selection) {
+  return selection != null && (selection.startLineNumber !== selection.endLineNumber || selection.startColumn !== selection.endColumn);
+}
+
+function lineRangeFromEditor(editor) {
+  const selection = editor.getSelection?.();
+  if (selection != null) {
+    return {
+      startLine: Math.min(selection.startLineNumber, selection.endLineNumber),
+      endLine: Math.max(selection.startLineNumber, selection.endLineNumber),
+      hasSelection: selectionHasRange(selection),
+    };
+  }
+
+  const position = editor.getPosition?.();
+  const line = position?.lineNumber ?? 1;
+  return { startLine: line, endLine: line, hasSelection: false };
+}
+
+function getExplainSelectionTarget() {
+  const file = activeFile();
+  if (!file || !diffEditor) return null;
+
+  const candidates = [
+    { side: "original", editor: diffEditor.getOriginalEditor() },
+    { side: "modified", editor: diffEditor.getModifiedEditor() },
+  ].filter((candidate) => canCommentOnSide(file, candidate.side));
+
+  if (candidates.length === 0) return null;
+
+  const focused = candidates.find((candidate) => candidate.editor.hasTextFocus?.());
+  const selected = candidates.find((candidate) => selectionHasRange(candidate.editor.getSelection?.()));
+  const fallback = candidates.find((candidate) => candidate.side === "modified") ?? candidates[0];
+  const candidate = focused ?? selected ?? fallback;
+  const range = lineRangeFromEditor(candidate.editor);
+
+  return {
+    side: candidate.side,
+    startLine: range.startLine,
+    endLine: range.endLine,
+    hasSelection: range.hasSelection,
+  };
+}
+
+function requestExplanation(kind) {
+  const file = activeFile();
+  if (!file) {
+    sendClientLog("warn", "explanation requested without active file", { kind });
+    return;
+  }
+
+  if (!isActiveFileReady()) {
+    ensureFileLoaded(file.id, state.currentScope);
+    setExplanation({
+      status: "error",
+      requestId: null,
+      title: "File is loading",
+      markdown: "",
+      error: "Wait for this file to finish loading, then ask again.",
+      source: null,
+    });
+    return;
+  }
+
+  const requestId = `explain:${Date.now()}:${++requestSequence}`;
+  const branch = state.currentScope === "branch-diff" ? state.selectedBranch : null;
+  const base = {
+    requestId,
+    fileId: file.id,
+    scope: state.currentScope,
+    branch,
+  };
+
+  let payload;
+  let title;
+  let source;
+  if (kind === "selection") {
+    const selection = getExplainSelectionTarget();
+    if (selection == null) {
+      setExplanation({
+        status: "error",
+        requestId: null,
+        title: "No selectable lines",
+        markdown: "",
+        error: "This file has no selectable side to explain.",
+        source: null,
+      });
+      return;
+    }
+    payload = { type: "explain-selection", ...base, side: selection.side, startLine: selection.startLine, endLine: selection.endLine };
+    title = `Explaining ${getScopeDisplayPath(file, state.currentScope)}:${selection.startLine}-${selection.endLine}`;
+    source = { ...base, kind, side: selection.side, startLine: selection.startLine, endLine: selection.endLine };
+  } else {
+    payload = { type: "explain-file", ...base };
+    title = `Explaining ${getScopeDisplayPath(file, state.currentScope)}`;
+    source = { ...base, kind };
+  }
+
+  setExplanation({
+    status: "loading",
+    requestId,
+    title,
+    markdown: "",
+    error: "",
+    source,
+  });
+
+  sendClientLog("info", "requesting explanation", payload);
+  if (window.glimpse?.send) {
+    window.glimpse.send(payload);
+  } else {
+    setExplanation({
+      status: "error",
+      requestId,
+      title,
+      markdown: "",
+      error: "Glimpse message bridge is unavailable.",
+      source,
+    });
+  }
+}
+
+function addExplanationToOverallNote() {
+  if (!state.explanation.markdown) return;
+  const title = state.explanation.title || "AI explanation";
+  const addition = `AI explanation — ${title}\n\n${state.explanation.markdown}`;
+  state.overallComment = [state.overallComment.trim(), addition].filter(Boolean).join("\n\n");
+  renderTree();
+}
+
+function addExplanationAsComment() {
+  if (!state.explanation.markdown || !state.explanation.source) return;
+  const source = state.explanation.source;
+  const file = reviewFileById.get(source.fileId);
+  if (!file) return;
+
+  state.comments.push({
+    id: `${Date.now()}:${Math.random().toString(16).slice(2)}`,
+    fileId: file.id,
+    scope: source.scope,
+    branch: source.branch,
+    side: source.side ?? "file",
+    startLine: source.startLine ?? null,
+    endLine: source.endLine ?? null,
+    body: `AI explanation:\n\n${state.explanation.markdown}`,
+  });
+  submitButton.disabled = false;
+  updateCommentsUI();
+}
+
 function openFile(fileId) {
   if (state.activeFileId === fileId) {
     ensureFileLoaded(fileId, state.currentScope);
@@ -632,6 +869,7 @@ function updateToggleButtons() {
   updateScopeButtons();
   modeHintEl.textContent = scopeHint(state.currentScope);
   submitButton.disabled = false;
+  renderExplanationPanel();
 }
 
 function applyEditorOptions() {
@@ -1045,6 +1283,34 @@ window.__reviewReceive = function (message) {
   if (!message || typeof message !== "object") return;
   const key = cacheKey(message.scope, message.fileId, message.branch);
 
+  if (message.type === "explanation-data") {
+    sendClientLog("info", "received explanation", { requestId: message.requestId, chars: (message.markdown || "").length });
+    if (state.explanation.requestId !== message.requestId) return;
+    setExplanation({
+      status: "ready",
+      requestId: message.requestId,
+      title: message.title || "Explanation",
+      markdown: message.markdown || "No explanation returned.",
+      error: "",
+      source: state.explanation.source,
+    });
+    return;
+  }
+
+  if (message.type === "explanation-error") {
+    sendClientLog("error", "received explanation error", { requestId: message.requestId, message: message.message });
+    if (state.explanation.requestId !== message.requestId) return;
+    setExplanation({
+      status: "error",
+      requestId: message.requestId,
+      title: message.title || "Explanation failed",
+      markdown: "",
+      error: message.message || "Unable to generate an explanation.",
+      source: state.explanation.source,
+    });
+    return;
+  }
+
   if (message.type === "file-data") {
     state.fileContents[key] = {
       originalContent: message.originalContent,
@@ -1168,6 +1434,22 @@ overallCommentButton.addEventListener("click", () => {
 
 fileCommentButton.addEventListener("click", () => {
   showFileCommentModal();
+});
+
+explainFileButton.addEventListener("click", () => {
+  requestExplanation("file");
+});
+
+explainSelectionButton.addEventListener("click", () => {
+  requestExplanation("selection");
+});
+
+explanationAddCommentButton.addEventListener("click", () => {
+  addExplanationAsComment();
+});
+
+explanationAddOverallButton.addEventListener("click", () => {
+  addExplanationToOverallNote();
 });
 
 toggleUnchangedButton.addEventListener("click", () => {
