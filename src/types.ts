@@ -88,7 +88,27 @@ export interface ReviewClientLogPayload {
   details?: unknown;
 }
 
-export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload | ReviewRequestFilePayload | ReviewExplainFilePayload | ReviewExplainSelectionPayload | ReviewClientLogPayload;
+export interface ReviewClientReadyPayload {
+  type: "client-ready";
+}
+
+export interface ReviewChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface ReviewAiChatPayload {
+  type: "ai-chat";
+  requestId: string;
+  fileId: string | null;
+  scope: ReviewScope;
+  branch: string | null;
+  question: string;
+  contextMarkdown: string;
+  messages: ReviewChatMessage[];
+}
+
+export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload | ReviewRequestFilePayload | ReviewExplainFilePayload | ReviewExplainSelectionPayload | ReviewClientLogPayload | ReviewClientReadyPayload | ReviewAiChatPayload;
 
 export interface ReviewFileDataMessage {
   type: "file-data";
@@ -129,7 +149,19 @@ export interface ReviewExplanationErrorMessage {
   message: string;
 }
 
-export type ReviewHostMessage = ReviewFileDataMessage | ReviewFileErrorMessage | ReviewExplanationDataMessage | ReviewExplanationErrorMessage;
+export interface ReviewAiChatDataMessage {
+  type: "ai-chat-data";
+  requestId: string;
+  markdown: string;
+}
+
+export interface ReviewAiChatErrorMessage {
+  type: "ai-chat-error";
+  requestId: string;
+  message: string;
+}
+
+export type ReviewHostMessage = ReviewFileDataMessage | ReviewFileErrorMessage | ReviewExplanationDataMessage | ReviewExplanationErrorMessage | ReviewAiChatDataMessage | ReviewAiChatErrorMessage;
 
 export interface BranchComparison {
   branch: string;

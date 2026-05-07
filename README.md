@@ -16,7 +16,7 @@ Adds a `/diff-review` command to pi.
 
 The command:
 
-1. opens a native review window
+1. opens a native review window without blocking the pi session input
 2. lets you switch between `git diff`, `last commit`, and `all files` scopes
 3. lets you optionally compare against `main` or `master` from the review UI
 4. shows a collapsible sidebar with fuzzy file search
@@ -24,10 +24,11 @@ The command:
 6. lazy-loads file contents on demand as you switch files and scopes
 7. lets you draft comments on the original side, modified side, or whole file
 8. explains the current file or selected lines using the active pi model
-9. lets you add explanations to the overall note or as review comments
-10. inserts the resulting feedback prompt into the pi editor when you submit
+9. lets you ask follow-up questions in the resizable AI panel
+10. lets you add explanations to the overall note or as review comments
+11. inserts the resulting feedback prompt into an empty pi editor, or appends it if the editor already has text
 
-Troubleshooting logs are written to `/tmp/pi-diff-review.log`. Use `/diff-review-log` to insert the latest log tail into the pi editor.
+Troubleshooting logs are written to `/tmp/pi-diff-review.log`.
 
 ## Requirements
 

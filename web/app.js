@@ -24,11 +24,13 @@ const state = {
   explanation: {
     status: "idle",
     requestId: null,
-    title: "No explanation yet",
+    title: "AI assistant",
     markdown: "",
     error: "",
     source: null,
+    messages: [],
   },
+  aiPanelWidth: 360,
 };
 
 const sidebarEl = document.getElementById("sidebar");
@@ -56,6 +58,8 @@ const fileCommentButton = document.getElementById("file-comment-button");
 const toggleReviewedButton = document.getElementById("toggle-reviewed-button");
 const toggleUnchangedButton = document.getElementById("toggle-unchanged-button");
 const toggleWrapButton = document.getElementById("toggle-wrap-button");
+const aiPanelEl = document.getElementById("ai-panel");
+const aiPanelResizerEl = document.getElementById("ai-panel-resizer");
 const explanationTitleEl = document.getElementById("explanation-title");
 const explanationStatusEl = document.getElementById("explanation-status");
 const explanationOutputEl = document.getElementById("explanation-output");
@@ -63,6 +67,8 @@ const explainFileButton = document.getElementById("explain-file-button");
 const explainSelectionButton = document.getElementById("explain-selection-button");
 const explanationAddCommentButton = document.getElementById("explanation-add-comment-button");
 const explanationAddOverallButton = document.getElementById("explanation-add-overall-button");
+const aiChatInputEl = document.getElementById("ai-chat-input");
+const aiChatButton = document.getElementById("ai-chat-button");
 
 repoRootEl.textContent = reviewData.repoRoot || "";
 windowTitleEl.textContent = "Review";
@@ -527,38 +533,74 @@ function explanationStatusClass(status) {
   }
 }
 
+function renderAiMessage(message) {
+  const wrapper = document.createElement("div");
+  wrapper.className = message.role === "user"
+    ? "rounded-lg border border-[#58a6ff]/30 bg-[#58a6ff]/10 p-3"
+    : "rounded-lg border border-review-border bg-review-panel p-3";
+
+  const label = document.createElement("div");
+  label.className = "mb-2 text-[10px] font-semibold uppercase tracking-wider text-review-muted";
+  label.textContent = message.role === "user" ? "You" : "AI";
+  wrapper.appendChild(label);
+
+  const body = document.createElement("div");
+  body.className = "whitespace-pre-wrap text-sm leading-6 text-review-text";
+  body.textContent = message.content || "";
+  wrapper.appendChild(body);
+
+  return wrapper;
+}
+
 function renderExplanationPanel() {
   const file = activeFile();
-  const busy = state.explanation.status === "loading";
+  const busy = state.explanation.status === "loading" || state.explanation.status === "chatting";
   const fileReady = file != null && isActiveFileReady();
   explainFileButton.disabled = !file || !fileReady || busy;
   explainSelectionButton.disabled = !file || !fileReady || busy;
-  explanationAddCommentButton.disabled = !state.explanation.markdown || busy;
+  explanationAddCommentButton.disabled = !state.explanation.markdown || !state.explanation.source || busy;
   explanationAddOverallButton.disabled = !state.explanation.markdown || busy;
+  aiChatButton.disabled = busy || aiChatInputEl.value.trim().length === 0;
 
-  explanationTitleEl.textContent = state.explanation.title || "No explanation yet";
+  explanationTitleEl.textContent = state.explanation.title || "AI assistant";
   explanationStatusEl.textContent = state.explanation.status === "loading"
     ? "Thinking"
-    : state.explanation.status === "ready"
-      ? "Ready"
-      : state.explanation.status === "error"
-        ? "Error"
-        : "Idle";
-  explanationStatusEl.className = explanationStatusClass(state.explanation.status);
+    : state.explanation.status === "chatting"
+      ? "Replying"
+      : state.explanation.status === "ready"
+        ? "Ready"
+        : state.explanation.status === "error"
+          ? "Error"
+          : "Idle";
+  explanationStatusEl.className = explanationStatusClass(state.explanation.status === "chatting" ? "loading" : state.explanation.status);
 
-  if (state.explanation.status === "loading") {
-    explanationOutputEl.textContent = "Asking the current pi model to explain this...";
-  } else if (state.explanation.status === "error") {
-    explanationOutputEl.textContent = state.explanation.error || "Unable to generate an explanation.";
-  } else if (state.explanation.markdown) {
-    explanationOutputEl.textContent = state.explanation.markdown;
-  } else if (!file) {
-    explanationOutputEl.textContent = "Pick a file, then ask for an explanation.";
-  } else if (!fileReady) {
-    explanationOutputEl.textContent = "File contents are still loading.";
-  } else {
-    explanationOutputEl.textContent = "Use Explain file or select lines in the editor and use Explain selection.";
+  explanationOutputEl.innerHTML = "";
+  const messages = state.explanation.messages || [];
+  if (messages.length > 0) {
+    const stack = document.createElement("div");
+    stack.className = "space-y-3";
+    messages.forEach((message) => stack.appendChild(renderAiMessage(message)));
+    explanationOutputEl.appendChild(stack);
+    explanationOutputEl.scrollTop = explanationOutputEl.scrollHeight;
+    return;
   }
+
+  const fallback = document.createElement("div");
+  fallback.className = "whitespace-pre-wrap";
+  if (state.explanation.status === "loading") {
+    fallback.textContent = "Asking the current pi model to review this...";
+  } else if (state.explanation.status === "error") {
+    fallback.textContent = state.explanation.error || "Unable to generate an AI response.";
+  } else if (state.explanation.markdown) {
+    fallback.textContent = state.explanation.markdown;
+  } else if (!file) {
+    fallback.textContent = "Pick a file, then ask for an explanation or a follow-up review question.";
+  } else if (!fileReady) {
+    fallback.textContent = "File contents are still loading.";
+  } else {
+    fallback.textContent = "Use the buttons above to explain the file or selected lines, or ask a question below.";
+  }
+  explanationOutputEl.appendChild(fallback);
 }
 
 function selectionHasRange(selection) {
@@ -621,6 +663,7 @@ function requestExplanation(kind) {
       markdown: "",
       error: "Wait for this file to finish loading, then ask again.",
       source: null,
+      messages: [],
     });
     return;
   }
@@ -647,6 +690,7 @@ function requestExplanation(kind) {
         markdown: "",
         error: "This file has no selectable side to explain.",
         source: null,
+        messages: [],
       });
       return;
     }
@@ -666,6 +710,7 @@ function requestExplanation(kind) {
     markdown: "",
     error: "",
     source,
+    messages: [],
   });
 
   sendClientLog("info", "requesting explanation", payload);
@@ -679,6 +724,7 @@ function requestExplanation(kind) {
       markdown: "",
       error: "Glimpse message bridge is unavailable.",
       source,
+      messages: [],
     });
   }
 }
@@ -709,6 +755,51 @@ function addExplanationAsComment() {
   });
   submitButton.disabled = false;
   updateCommentsUI();
+}
+
+function requestAiChat() {
+  const question = aiChatInputEl.value.trim();
+  if (!question || state.explanation.status === "loading" || state.explanation.status === "chatting") return;
+
+  const file = activeFile();
+  const requestId = `ai-chat:${Date.now()}:${++requestSequence}`;
+  const branch = state.currentScope === "branch-diff" ? state.selectedBranch : null;
+  const previousMessages = (state.explanation.messages || []).filter((message) => message.pending !== true);
+  const messages = [
+    ...previousMessages,
+    { role: "user", content: question },
+    { role: "assistant", content: "Thinking...", pending: true },
+  ];
+
+  setExplanation({
+    status: "chatting",
+    requestId,
+    title: state.explanation.title || "AI assistant",
+    error: "",
+    messages,
+  });
+  aiChatInputEl.value = "";
+  renderExplanationPanel();
+
+  if (window.glimpse?.send) {
+    window.glimpse.send({
+      type: "ai-chat",
+      requestId,
+      fileId: file?.id ?? null,
+      scope: state.currentScope,
+      branch,
+      question,
+      contextMarkdown: state.explanation.markdown || "",
+      messages: previousMessages,
+    });
+  } else {
+    setExplanation({
+      status: "error",
+      requestId,
+      error: "Glimpse message bridge is unavailable.",
+      messages: [...previousMessages, { role: "user", content: question }, { role: "assistant", content: "Glimpse message bridge is unavailable." }],
+    });
+  }
 }
 
 function openFile(fileId) {
@@ -821,6 +912,19 @@ function updateSidebarLayout() {
   sidebarEl.style.borderRightWidth = collapsed ? "0px" : "1px";
   sidebarEl.style.pointerEvents = collapsed ? "none" : "auto";
   toggleSidebarButton.textContent = collapsed ? "Show sidebar" : "Hide sidebar";
+}
+
+function clampAiPanelWidth(width) {
+  const maxWidth = Math.max(300, Math.min(820, window.innerWidth - 520));
+  return Math.max(260, Math.min(maxWidth, width));
+}
+
+function updateAiPanelLayout() {
+  state.aiPanelWidth = clampAiPanelWidth(state.aiPanelWidth);
+  const width = `${state.aiPanelWidth}px`;
+  aiPanelEl.style.width = width;
+  aiPanelEl.style.minWidth = width;
+  aiPanelEl.style.flexBasis = width;
 }
 
 function updateScopeButtons() {
@@ -992,6 +1096,41 @@ function layoutEditor() {
   const height = editorContainerEl.clientHeight;
   if (width <= 0 || height <= 0) return;
   diffEditor.layout({ width, height });
+}
+
+function setupAiPanelResizer() {
+  let dragging = false;
+
+  const stopDragging = () => {
+    if (!dragging) return;
+    dragging = false;
+    aiPanelResizerEl.classList.remove("is-dragging");
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+  };
+
+  aiPanelResizerEl.addEventListener("pointerdown", (event) => {
+    dragging = true;
+    aiPanelResizerEl.classList.add("is-dragging");
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    aiPanelResizerEl.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+  });
+
+  window.addEventListener("pointermove", (event) => {
+    if (!dragging) return;
+    state.aiPanelWidth = window.innerWidth - event.clientX;
+    updateAiPanelLayout();
+    requestAnimationFrame(layoutEditor);
+  });
+
+  window.addEventListener("pointerup", stopDragging);
+  window.addEventListener("pointercancel", stopDragging);
+  window.addEventListener("resize", () => {
+    updateAiPanelLayout();
+    requestAnimationFrame(layoutEditor);
+  });
 }
 
 function clearViewZones() {
@@ -1293,6 +1432,7 @@ window.__reviewReceive = function (message) {
       markdown: message.markdown || "No explanation returned.",
       error: "",
       source: state.explanation.source,
+      messages: [{ role: "assistant", content: message.markdown || "No explanation returned." }],
     });
     return;
   }
@@ -1307,6 +1447,40 @@ window.__reviewReceive = function (message) {
       markdown: "",
       error: message.message || "Unable to generate an explanation.",
       source: state.explanation.source,
+      messages: [],
+    });
+    return;
+  }
+
+  if (message.type === "ai-chat-data") {
+    if (state.explanation.requestId !== message.requestId) return;
+    const messages = [...(state.explanation.messages || [])];
+    const pendingIndex = messages.findIndex((item) => item.pending === true);
+    if (pendingIndex >= 0) messages.splice(pendingIndex, 1, { role: "assistant", content: message.markdown || "No answer returned." });
+    else messages.push({ role: "assistant", content: message.markdown || "No answer returned." });
+    setExplanation({
+      status: "ready",
+      requestId: message.requestId,
+      markdown: message.markdown || "No answer returned.",
+      error: "",
+      messages,
+    });
+    return;
+  }
+
+  if (message.type === "ai-chat-error") {
+    if (state.explanation.requestId !== message.requestId) return;
+    const messages = [...(state.explanation.messages || [])];
+    const pendingIndex = messages.findIndex((item) => item.pending === true);
+    const errorText = message.message || "Unable to answer that question.";
+    if (pendingIndex >= 0) messages.splice(pendingIndex, 1, { role: "assistant", content: errorText });
+    else messages.push({ role: "assistant", content: errorText });
+    setExplanation({
+      status: "error",
+      requestId: message.requestId,
+      markdown: "",
+      error: errorText,
+      messages,
     });
     return;
   }
@@ -1452,6 +1626,21 @@ explanationAddOverallButton.addEventListener("click", () => {
   addExplanationToOverallNote();
 });
 
+aiChatButton.addEventListener("click", () => {
+  requestAiChat();
+});
+
+aiChatInputEl.addEventListener("input", () => {
+  renderExplanationPanel();
+});
+
+aiChatInputEl.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    requestAiChat();
+  }
+});
+
 toggleUnchangedButton.addEventListener("click", () => {
   state.hideUnchanged = !state.hideUnchanged;
   applyEditorOptions();
@@ -1553,7 +1742,13 @@ sidebarSearchInputEl.addEventListener("keydown", (event) => {
 
 setupBranchComparisonSelect();
 ensureActiveFileForScope();
+updateAiPanelLayout();
+setupAiPanelResizer();
 renderTree();
 renderFileComments();
 updateSidebarLayout();
 setupMonaco();
+
+if (window.glimpse?.send) {
+  window.glimpse.send({ type: "client-ready" });
+}

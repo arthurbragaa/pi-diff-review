@@ -123,7 +123,18 @@
   }
 
   #explanation-output {
-    white-space: pre-wrap;
+    white-space: normal;
+  }
+
+  #ai-panel-resizer {
+    width: 6px;
+    cursor: col-resize;
+    background: transparent;
+  }
+
+  #ai-panel-resizer:hover,
+  #ai-panel-resizer.is-dragging {
+    background: rgba(88, 166, 255, 0.35);
   }
 </style>
 </head>
@@ -187,11 +198,12 @@
     <div id="editor-container" class="min-h-0 min-w-0 flex-1"></div>
     </main>
 
-    <aside id="ai-panel" class="flex min-h-0 w-[360px] shrink-0 flex-col border-l border-review-border bg-[#0d1117]">
+    <div id="ai-panel-resizer" class="shrink-0 border-l border-review-border" title="Drag to resize AI panel"></div>
+    <aside id="ai-panel" class="flex min-h-0 shrink-0 flex-col border-l border-review-border bg-[#0d1117]" style="width: 360px; min-width: 260px; flex-basis: 360px;">
       <div class="border-b border-review-border px-4 py-3">
         <div class="flex items-start justify-between gap-3">
           <div class="min-w-0">
-            <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">AI explanation</div>
+            <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">AI assistant</div>
             <div id="explanation-title" class="mt-1 truncate text-sm font-semibold text-white">No explanation yet</div>
           </div>
           <div id="explanation-status" class="shrink-0 rounded-full border border-review-border px-2 py-0.5 text-[10px] font-medium text-review-muted">Idle</div>
@@ -203,7 +215,9 @@
       </div>
       <div id="explanation-output" class="scrollbar-thin min-h-0 flex-1 overflow-auto px-4 py-4 text-sm leading-6 text-review-text">Pick a file, then ask for an explanation.</div>
       <div class="border-t border-review-border px-4 py-3">
+        <textarea id="ai-chat-input" class="scrollbar-thin mb-2 min-h-20 w-full resize-y rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm text-review-text outline-none placeholder:text-review-muted focus:border-blue-500 focus:ring-1 focus:ring-blue-500" placeholder="Ask a follow-up question… (Enter to send, Shift+Enter for newline)"></textarea>
         <div class="grid grid-cols-1 gap-2">
+          <button id="ai-chat-button" class="cursor-pointer rounded-md border border-[rgba(240,246,252,0.1)] bg-[#238636] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#2ea043] disabled:cursor-default disabled:opacity-50 disabled:hover:bg-[#238636]">Ask AI</button>
           <button id="explanation-add-comment-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1.5 text-xs font-medium text-review-text hover:bg-[#21262d] disabled:cursor-default disabled:opacity-50 disabled:hover:bg-review-panel">Add as review comment</button>
           <button id="explanation-add-overall-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1.5 text-xs font-medium text-review-text hover:bg-[#21262d] disabled:cursor-default disabled:opacity-50 disabled:hover:bg-review-panel">Add to overall note</button>
         </div>

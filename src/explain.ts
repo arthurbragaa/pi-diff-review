@@ -1,10 +1,14 @@
 import { complete, type UserMessage } from "@mariozechner/pi-ai";
 import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
-import type { ReviewFile, ReviewFileContents, ReviewScope } from "./types.js";
+import type { ReviewChatMessage, ReviewFile, ReviewFileContents, ReviewScope } from "./types.js";
 
 const SYSTEM_PROMPT = `You explain source files and diffs to a developer using a review UI.
 
 Be concise, concrete, and educational. Explain what the code is for, the key flow, important dependencies or data shapes, and anything risky or surprising. Do not propose code changes unless there is an obvious issue in the provided text. If context is truncated, say so briefly. Use markdown.`;
+
+const CHAT_SYSTEM_PROMPT = `You are an AI assistant embedded in a diff review UI.
+
+Answer follow-up questions about the current review, selected file, and prior AI notes. Be concise, concrete, and use markdown. If you are unsure because the provided context is incomplete, say so.`;
 
 const MAX_SECTION_CHARS = 18_000;
 const MAX_SELECTION_LINES = 240;
@@ -174,20 +178,49 @@ function buildSelectionPrompt(file: ReviewFile, scope: ReviewScope, branch: stri
   ].join("\n");
 }
 
+function buildChatPrompt(options: {
+  repoRoot: string;
+  file: ReviewFile | null;
+  scope: ReviewScope;
+  branch: string | null;
+  contents: ReviewFileContents | null;
+  contextMarkdown: string;
+  messages: ReviewChatMessage[];
+  question: string;
+}): string {
+  const fileSection = options.file == null || options.contents == null
+    ? "No current file context was provided."
+    : buildFilePrompt(options.file, options.scope, options.branch, options.contents);
+  const history = options.messages
+    .slice(-10)
+    .map((message) => `${message.role === "user" ? "User" : "Assistant"}: ${message.content}`)
+    .join("\n\n");
+
+  return [
+    `Repo: ${options.repoRoot}`,
+    `Scope: ${scopeLabel(options.scope, options.branch)}`,
+    "",
+    `Current AI assistant context:`,
+    options.contextMarkdown || "No prior AI assistant context.",
+    "",
+    `Current file context:`,
+    fileSection,
+    "",
+    `Conversation so far:`,
+    history || "No previous chat messages.",
+    "",
+    `Latest user question:`,
+    options.question,
+  ].join("\n");
+}
+
 export function explanationTitle(file: ReviewFile, selection: ExplanationSelection | null): string {
   if (selection == null) return `Explanation: ${file.path}`;
   const side = selection.side === "original" ? "old" : "new";
   return `Explanation: ${file.path}:${selection.startLine}-${selection.endLine} (${side})`;
 }
 
-export async function explainReviewFile(
-  ctx: ExtensionCommandContext,
-  file: ReviewFile,
-  scope: ReviewScope,
-  branch: string | null,
-  contents: ReviewFileContents,
-  selection: ExplanationSelection | null,
-): Promise<string> {
+async function completeText(ctx: ExtensionCommandContext, systemPrompt: string, prompt: string): Promise<string> {
   const model = ctx.model;
   if (!model) {
     throw new Error("No model selected in pi.");
@@ -198,10 +231,6 @@ export async function explainReviewFile(
     throw new Error(`No API key or request headers for ${model.provider}.`);
   }
 
-  const prompt = selection == null
-    ? buildFilePrompt(file, scope, branch, contents)
-    : buildSelectionPrompt(file, scope, branch, contents, selection);
-
   const userMessage: UserMessage = {
     role: "user",
     content: [{ type: "text", text: prompt }],
@@ -210,12 +239,12 @@ export async function explainReviewFile(
 
   const response = await complete(
     model,
-    { systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
+    { systemPrompt, messages: [userMessage] },
     { apiKey: auth.apiKey, headers: auth.headers },
   );
 
   if (response.stopReason === "aborted") {
-    throw new Error("Explanation cancelled.");
+    throw new Error("AI request cancelled.");
   }
 
   const text = response.content
@@ -224,5 +253,37 @@ export async function explainReviewFile(
     .join("\n")
     .trim();
 
-  return text || "No explanation returned.";
+  return text;
+}
+
+export async function explainReviewFile(
+  ctx: ExtensionCommandContext,
+  file: ReviewFile,
+  scope: ReviewScope,
+  branch: string | null,
+  contents: ReviewFileContents,
+  selection: ExplanationSelection | null,
+): Promise<string> {
+  const prompt = selection == null
+    ? buildFilePrompt(file, scope, branch, contents)
+    : buildSelectionPrompt(file, scope, branch, contents, selection);
+
+  return await completeText(ctx, SYSTEM_PROMPT, prompt) || "No explanation returned.";
+}
+
+export async function answerReviewQuestion(
+  ctx: ExtensionCommandContext,
+  options: {
+    repoRoot: string;
+    file: ReviewFile | null;
+    scope: ReviewScope;
+    branch: string | null;
+    contents: ReviewFileContents | null;
+    contextMarkdown: string;
+    messages: ReviewChatMessage[];
+    question: string;
+  },
+): Promise<string> {
+  const prompt = buildChatPrompt(options);
+  return await completeText(ctx, CHAT_SYSTEM_PROMPT, prompt) || "No answer returned.";
 }

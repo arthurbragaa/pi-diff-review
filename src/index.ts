@@ -1,14 +1,15 @@
 import { readdirSync, statSync } from "node:fs";
-import { appendFile, readFile } from "node:fs/promises";
+import { appendFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
-import { Key, matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
-import { open, type GlimpseWindow } from "glimpseui";
-import { explainReviewFile, explanationTitle, type ExplanationSelection } from "./explain.js";
+import type { GlimpseWindow } from "glimpseui";
+import { answerReviewQuestion, explainReviewFile, explanationTitle, type ExplanationSelection } from "./explain.js";
 import { getReviewWindowData, loadReviewFileContents } from "./git.js";
+import { openQuietGlimpse } from "./glimpse-quiet.js";
 import { composeReviewPrompt } from "./prompt.js";
 import { loadReviewedFiles, saveReviewedFiles } from "./review-state.js";
 import type {
+  ReviewAiChatPayload,
   ReviewCancelPayload,
   ReviewClientLogPayload,
   ReviewExplainFilePayload,
@@ -46,9 +47,15 @@ function isClientLogPayload(value: ReviewWindowMessage): value is ReviewClientLo
   return value.type === "client-log";
 }
 
-const LOG_PATH = "/tmp/pi-diff-review.log";
+function isClientReadyPayload(value: ReviewWindowMessage): boolean {
+  return value.type === "client-ready";
+}
 
-type WaitingEditorResult = "escape" | "window-settled";
+function isAiChatPayload(value: ReviewWindowMessage): value is ReviewAiChatPayload {
+  return value.type === "ai-chat";
+}
+
+const LOG_PATH = "/tmp/pi-diff-review.log";
 
 function escapeForInlineScript(value: string): string {
   return value.replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
@@ -67,11 +74,6 @@ async function logReview(level: "debug" | "info" | "warn" | "error", message: st
   try {
     await appendFile(LOG_PATH, line, "utf8");
   } catch {}
-}
-
-function tailText(value: string, maxLines: number): string {
-  const lines = value.split(/\r?\n/);
-  return lines.slice(Math.max(0, lines.length - maxLines)).join("\n").trim();
 }
 
 function waylandSocketExists(display: string): boolean {
@@ -115,81 +117,30 @@ function ensureGlimpseDisplayEnvironment(): void {
 
 export default function (pi: ExtensionAPI) {
   let activeWindow: GlimpseWindow | null = null;
-  let activeWaitingUIDismiss: (() => void) | null = null;
+
+  function closeWindow(window: GlimpseWindow): void {
+    try {
+      window.close();
+    } catch {}
+  }
 
   function closeActiveWindow(): void {
     if (activeWindow == null) return;
     const windowToClose = activeWindow;
     activeWindow = null;
-    try {
-      windowToClose.close();
-    } catch {}
+    closeWindow(windowToClose);
   }
 
-  function showWaitingUI(ctx: ExtensionCommandContext): {
-    promise: Promise<WaitingEditorResult>;
-    dismiss: () => void;
-  } {
-    let settled = false;
-    let doneFn: ((result: WaitingEditorResult) => void) | null = null;
-    let pendingResult: WaitingEditorResult | null = null;
+  function insertOrAppendEditorText(ctx: ExtensionCommandContext, text: string): "inserted" | "appended" {
+    const currentText = ctx.ui.getEditorText();
+    if (currentText.trim().length === 0) {
+      ctx.ui.setEditorText(text);
+      return "inserted";
+    }
 
-    const finish = (result: WaitingEditorResult): void => {
-      if (settled) return;
-      settled = true;
-      if (activeWaitingUIDismiss === dismiss) {
-        activeWaitingUIDismiss = null;
-      }
-      if (doneFn != null) {
-        doneFn(result);
-      } else {
-        pendingResult = result;
-      }
-    };
-
-    const promise = ctx.ui.custom<WaitingEditorResult>((_tui, theme, _kb, done) => {
-      doneFn = done;
-      if (pendingResult != null) {
-        const result = pendingResult;
-        pendingResult = null;
-        queueMicrotask(() => done(result));
-      }
-
-      return {
-        render(width: number): string[] {
-          const innerWidth = Math.max(24, width - 2);
-          const borderTop = theme.fg("border", `╭${"─".repeat(innerWidth)}╮`);
-          const borderBottom = theme.fg("border", `╰${"─".repeat(innerWidth)}╯`);
-          const lines = [
-            theme.fg("accent", theme.bold("Waiting for review")),
-            "The native review window is open.",
-            "Press Escape to cancel and close the review window.",
-          ];
-          return [
-            borderTop,
-            ...lines.map((line) => `${theme.fg("border", "│")}${truncateToWidth(line, innerWidth, "...", true).padEnd(innerWidth, " ")}${theme.fg("border", "│")}`),
-            borderBottom,
-          ];
-        },
-        handleInput(data: string): void {
-          if (matchesKey(data, Key.escape)) {
-            finish("escape");
-          }
-        },
-        invalidate(): void {},
-      };
-    });
-
-    const dismiss = (): void => {
-      finish("window-settled");
-    };
-
-    activeWaitingUIDismiss = dismiss;
-
-    return {
-      promise,
-      dismiss,
-    };
+    const separator = currentText.endsWith("\n\n") ? "" : currentText.endsWith("\n") ? "\n" : "\n\n";
+    ctx.ui.setEditorText(`${currentText}${separator}${text}`);
+    return "appended";
   }
 
   async function reviewRepository(ctx: ExtensionCommandContext): Promise<void> {
@@ -211,22 +162,41 @@ export default function (pi: ExtensionAPI) {
     const reviewedFiles = await loadReviewedFiles(pi, repoRoot);
     const html = buildReviewHtml({ repoRoot, files, reviewedFiles, branchComparisons });
     ensureGlimpseDisplayEnvironment();
-    const window = open(html, {
+    const window = openQuietGlimpse(html, {
       width: 1680,
       height: 1020,
       title: "pi review",
+    }, (line) => {
+      void logReview("warn", "glimpse stderr", line);
     });
     activeWindow = window;
     await logReview("info", "native review window opened", { logPath: LOG_PATH });
 
-    const waitingUI = showWaitingUI(ctx);
     const fileMap = new Map(files.map((file) => [file.id, file]));
     const contentCache = new Map<string, Promise<ReviewFileContents>>();
+    const queuedWindowMessages: ReviewHostMessage[] = [];
+    let clientReady = false;
 
-    const sendWindowMessage = (message: ReviewHostMessage): void => {
+    const sendWindowMessageNow = (message: ReviewHostMessage): void => {
       if (activeWindow !== window) return;
       const payload = escapeForInlineScript(JSON.stringify(message));
       window.send(`window.__reviewReceive(${payload});`);
+    };
+
+    const sendWindowMessage = (message: ReviewHostMessage): void => {
+      if (!clientReady) {
+        queuedWindowMessages.push(message);
+        return;
+      }
+      sendWindowMessageNow(message);
+    };
+
+    const flushWindowMessages = (): void => {
+      if (activeWindow !== window) return;
+      clientReady = true;
+      for (const message of queuedWindowMessages.splice(0)) {
+        sendWindowMessageNow(message);
+      }
     };
 
     const loadContents = (file: ReviewFile, scope: ReviewRequestFilePayload["scope"], branch: string | null): Promise<ReviewFileContents> => {
@@ -242,176 +212,7 @@ export default function (pi: ExtensionAPI) {
       return pending;
     };
 
-    ctx.ui.notify("Opened native review window.", "info");
-
-    try {
-      const terminalMessagePromise = new Promise<ReviewSubmitPayload | ReviewCancelPayload | null>((resolve, reject) => {
-        let settled = false;
-
-        const cleanup = (): void => {
-          window.removeListener("message", onMessage);
-          window.removeListener("closed", onClosed);
-          window.removeListener("error", onError);
-          if (activeWindow === window) {
-            activeWindow = null;
-          }
-        };
-
-        const settle = (value: ReviewSubmitPayload | ReviewCancelPayload | null): void => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          resolve(value);
-        };
-
-        const handleRequestFile = async (message: ReviewRequestFilePayload): Promise<void> => {
-          await logReview("debug", "window requested file", { fileId: message.fileId, scope: message.scope, branch: message.branch });
-          const file = fileMap.get(message.fileId);
-          if (file == null) {
-            await logReview("warn", "window requested unknown file", { fileId: message.fileId });
-            sendWindowMessage({
-              type: "file-error",
-              requestId: message.requestId,
-              fileId: message.fileId,
-              scope: message.scope,
-              branch: message.branch,
-              message: "Unknown file requested.",
-            });
-            return;
-          }
-
-          try {
-            const contents = await loadContents(file, message.scope, message.branch);
-            await logReview("debug", "file contents loaded", { path: file.path, scope: message.scope, originalChars: contents.originalContent.length, modifiedChars: contents.modifiedContent.length });
-            sendWindowMessage({
-              type: "file-data",
-              requestId: message.requestId,
-              fileId: message.fileId,
-              scope: message.scope,
-              branch: message.branch,
-              originalContent: contents.originalContent,
-              modifiedContent: contents.modifiedContent,
-            });
-          } catch (error) {
-            const messageText = error instanceof Error ? error.message : String(error);
-            await logReview("error", "file contents failed", { fileId: message.fileId, scope: message.scope, message: messageText });
-            sendWindowMessage({
-              type: "file-error",
-              requestId: message.requestId,
-              fileId: message.fileId,
-              scope: message.scope,
-              branch: message.branch,
-              message: messageText,
-            });
-          }
-        };
-
-        const handleExplain = async (message: ReviewExplainFilePayload | ReviewExplainSelectionPayload): Promise<void> => {
-          await logReview("info", "window requested explanation", message);
-          const file = fileMap.get(message.fileId);
-          const selection: ExplanationSelection | null = isExplainSelectionPayload(message)
-            ? { side: message.side, startLine: message.startLine, endLine: message.endLine }
-            : null;
-          const title = file == null ? "Explanation" : explanationTitle(file, selection);
-
-          if (file == null) {
-            await logReview("warn", "window requested explanation for unknown file", { fileId: message.fileId });
-            sendWindowMessage({
-              type: "explanation-error",
-              requestId: message.requestId,
-              fileId: message.fileId,
-              scope: message.scope,
-              branch: message.branch,
-              title,
-              message: "Unknown file requested.",
-            });
-            return;
-          }
-
-          try {
-            const contents = await loadContents(file, message.scope, message.branch);
-            const markdown = await explainReviewFile(ctx, file, message.scope, message.branch, contents, selection);
-            await logReview("info", "explanation generated", { path: file.path, requestId: message.requestId, chars: markdown.length });
-            sendWindowMessage({
-              type: "explanation-data",
-              requestId: message.requestId,
-              fileId: message.fileId,
-              scope: message.scope,
-              branch: message.branch,
-              title,
-              markdown,
-            });
-          } catch (error) {
-            const messageText = error instanceof Error ? error.message : String(error);
-            await logReview("error", "explanation failed", { requestId: message.requestId, fileId: message.fileId, title, message: messageText });
-            sendWindowMessage({
-              type: "explanation-error",
-              requestId: message.requestId,
-              fileId: message.fileId,
-              scope: message.scope,
-              branch: message.branch,
-              title,
-              message: messageText,
-            });
-          }
-        };
-
-        const onMessage = (data: unknown): void => {
-          const message = data as ReviewWindowMessage;
-          if (isClientLogPayload(message)) {
-            void logReview(message.level, `client: ${message.message}`, message.details);
-            return;
-          }
-          if (isRequestFilePayload(message)) {
-            void handleRequestFile(message);
-            return;
-          }
-          if (isExplainFilePayload(message) || isExplainSelectionPayload(message)) {
-            void handleExplain(message);
-            return;
-          }
-          if (isSubmitPayload(message) || isCancelPayload(message)) {
-            void logReview("info", `window ${message.type}`);
-            settle(message);
-          }
-        };
-
-        const onClosed = (): void => {
-          void logReview("info", "native review window closed");
-          settle(null);
-        };
-
-        const onError = (error: Error): void => {
-          void logReview("error", "native review window error", { message: error.message, stack: error.stack });
-          if (settled) return;
-          settled = true;
-          cleanup();
-          reject(error);
-        };
-
-        window.on("message", onMessage);
-        window.on("closed", onClosed);
-        window.on("error", onError);
-      });
-
-      const result = await Promise.race([
-        terminalMessagePromise.then((message) => ({ type: "window" as const, message })),
-        waitingUI.promise.then((reason) => ({ type: "ui" as const, reason })),
-      ]);
-
-      if (result.type === "ui" && result.reason === "escape") {
-        closeActiveWindow();
-        await terminalMessagePromise.catch(() => null);
-        ctx.ui.notify("Review cancelled.", "info");
-        return;
-      }
-
-      const message = result.type === "window" ? result.message : await terminalMessagePromise;
-
-      waitingUI.dismiss();
-      await waitingUI.promise;
-      closeActiveWindow();
-
+    const finishReview = async (message: ReviewSubmitPayload | ReviewCancelPayload | null): Promise<void> => {
       if (message == null || message.type === "cancel") {
         ctx.ui.notify("Review cancelled.", "info");
         return;
@@ -426,15 +227,217 @@ export default function (pi: ExtensionAPI) {
       }
 
       const prompt = composeReviewPrompt(files, message);
-      ctx.ui.setEditorText(prompt);
-      ctx.ui.notify("Inserted review feedback into the editor.", "info");
-    } catch (error) {
-      activeWaitingUIDismiss?.();
-      closeActiveWindow();
+      const insertMode = insertOrAppendEditorText(ctx, prompt);
+      ctx.ui.notify(
+        insertMode === "inserted"
+          ? "Inserted review feedback into the editor."
+          : "Appended review feedback to the editor.",
+        "info",
+      );
+    };
+
+    const handleBackgroundError = async (error: unknown): Promise<void> => {
       const message = error instanceof Error ? error.message : String(error);
       await logReview("error", "review failed", { message, stack: error instanceof Error ? error.stack : undefined });
       ctx.ui.notify(`Review failed: ${message}`, "error");
-    }
+    };
+
+    let settled = false;
+
+    const cleanup = (): void => {
+      window.removeListener("message", onMessage);
+      window.removeListener("closed", onClosed);
+      window.removeListener("error", onError);
+      ctx.ui.setStatus("diff-review", undefined);
+      if (activeWindow === window) {
+        activeWindow = null;
+      }
+    };
+
+    const settle = (value: ReviewSubmitPayload | ReviewCancelPayload | null, shouldCloseWindow: boolean): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (shouldCloseWindow) {
+        closeWindow(window);
+      }
+      void finishReview(value).catch((error) => {
+        void handleBackgroundError(error);
+      });
+    };
+
+    const handleRequestFile = async (message: ReviewRequestFilePayload): Promise<void> => {
+      await logReview("debug", "window requested file", { fileId: message.fileId, scope: message.scope, branch: message.branch });
+      const file = fileMap.get(message.fileId);
+      if (file == null) {
+        await logReview("warn", "window requested unknown file", { fileId: message.fileId });
+        sendWindowMessage({
+          type: "file-error",
+          requestId: message.requestId,
+          fileId: message.fileId,
+          scope: message.scope,
+          branch: message.branch,
+          message: "Unknown file requested.",
+        });
+        return;
+      }
+
+      try {
+        const contents = await loadContents(file, message.scope, message.branch);
+        await logReview("debug", "file contents loaded", { path: file.path, scope: message.scope, originalChars: contents.originalContent.length, modifiedChars: contents.modifiedContent.length });
+        sendWindowMessage({
+          type: "file-data",
+          requestId: message.requestId,
+          fileId: message.fileId,
+          scope: message.scope,
+          branch: message.branch,
+          originalContent: contents.originalContent,
+          modifiedContent: contents.modifiedContent,
+        });
+      } catch (error) {
+        const messageText = error instanceof Error ? error.message : String(error);
+        await logReview("error", "file contents failed", { fileId: message.fileId, scope: message.scope, message: messageText });
+        sendWindowMessage({
+          type: "file-error",
+          requestId: message.requestId,
+          fileId: message.fileId,
+          scope: message.scope,
+          branch: message.branch,
+          message: messageText,
+        });
+      }
+    };
+
+    const handleExplain = async (message: ReviewExplainFilePayload | ReviewExplainSelectionPayload): Promise<void> => {
+      await logReview("info", "window requested explanation", message);
+      const file = fileMap.get(message.fileId);
+      const selection: ExplanationSelection | null = isExplainSelectionPayload(message)
+        ? { side: message.side, startLine: message.startLine, endLine: message.endLine }
+        : null;
+      const title = file == null ? "Explanation" : explanationTitle(file, selection);
+
+      if (file == null) {
+        await logReview("warn", "window requested explanation for unknown file", { fileId: message.fileId });
+        sendWindowMessage({
+          type: "explanation-error",
+          requestId: message.requestId,
+          fileId: message.fileId,
+          scope: message.scope,
+          branch: message.branch,
+          title,
+          message: "Unknown file requested.",
+        });
+        return;
+      }
+
+      try {
+        const contents = await loadContents(file, message.scope, message.branch);
+        const markdown = await explainReviewFile(ctx, file, message.scope, message.branch, contents, selection);
+        await logReview("info", "explanation generated", { path: file.path, requestId: message.requestId, chars: markdown.length });
+        sendWindowMessage({
+          type: "explanation-data",
+          requestId: message.requestId,
+          fileId: message.fileId,
+          scope: message.scope,
+          branch: message.branch,
+          title,
+          markdown,
+        });
+      } catch (error) {
+        const messageText = error instanceof Error ? error.message : String(error);
+        await logReview("error", "explanation failed", { requestId: message.requestId, fileId: message.fileId, title, message: messageText });
+        sendWindowMessage({
+          type: "explanation-error",
+          requestId: message.requestId,
+          fileId: message.fileId,
+          scope: message.scope,
+          branch: message.branch,
+          title,
+          message: messageText,
+        });
+      }
+    };
+
+    const handleAiChat = async (message: ReviewAiChatPayload): Promise<void> => {
+      await logReview("info", "window requested ai chat", { requestId: message.requestId, fileId: message.fileId, chars: message.question.length });
+      const file = message.fileId == null ? null : fileMap.get(message.fileId) ?? null;
+
+      try {
+        const contents = file == null ? null : await loadContents(file, message.scope, message.branch);
+        const markdown = await answerReviewQuestion(ctx, {
+          repoRoot,
+          file,
+          scope: message.scope,
+          branch: message.branch,
+          contents,
+          contextMarkdown: message.contextMarkdown,
+          messages: message.messages,
+          question: message.question,
+        });
+        sendWindowMessage({
+          type: "ai-chat-data",
+          requestId: message.requestId,
+          markdown,
+        });
+      } catch (error) {
+        const messageText = error instanceof Error ? error.message : String(error);
+        await logReview("error", "ai chat failed", { requestId: message.requestId, message: messageText });
+        sendWindowMessage({
+          type: "ai-chat-error",
+          requestId: message.requestId,
+          message: messageText,
+        });
+      }
+    };
+
+    const onMessage = (data: unknown): void => {
+      const message = data as ReviewWindowMessage;
+      if (isClientLogPayload(message)) {
+        void logReview(message.level, `client: ${message.message}`, message.details);
+        return;
+      }
+      if (isClientReadyPayload(message)) {
+        flushWindowMessages();
+        return;
+      }
+      if (isAiChatPayload(message)) {
+        void handleAiChat(message);
+        return;
+      }
+      if (isRequestFilePayload(message)) {
+        void handleRequestFile(message);
+        return;
+      }
+      if (isExplainFilePayload(message) || isExplainSelectionPayload(message)) {
+        void handleExplain(message);
+        return;
+      }
+      if (isSubmitPayload(message) || isCancelPayload(message)) {
+        void logReview("info", `window ${message.type}`);
+        settle(message, true);
+      }
+    };
+
+    const onClosed = (): void => {
+      void logReview("info", "native review window closed");
+      settle(null, false);
+    };
+
+    const onError = (error: Error): void => {
+      void logReview("error", "native review window error", { message: error.message, stack: error.stack });
+      if (settled) return;
+      settled = true;
+      cleanup();
+      closeWindow(window);
+      void handleBackgroundError(error);
+    };
+
+    window.on("message", onMessage);
+    window.on("closed", onClosed);
+    window.on("error", onError);
+
+    ctx.ui.setStatus("diff-review", "Review window open");
+    ctx.ui.notify("Opened native review window. Pi input remains available.", "info");
   }
 
   pi.registerCommand("diff-review", {
@@ -444,23 +447,7 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand("diff-review-log", {
-    description: "Insert the tail of the pi diff review log into the editor",
-    handler: async (args, ctx) => {
-      const maxLines = Number.parseInt(args.trim(), 10) || 120;
-      try {
-        const log = await readFile(LOG_PATH, "utf8");
-        ctx.ui.setEditorText(tailText(log, Math.max(20, Math.min(500, maxLines))));
-        ctx.ui.notify(`Inserted ${LOG_PATH} into the editor.`, "info");
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        ctx.ui.notify(`No diff review log found at ${LOG_PATH}: ${message}`, "warning");
-      }
-    },
-  });
-
   pi.on("session_shutdown", async () => {
-    activeWaitingUIDismiss?.();
     closeActiveWindow();
   });
 }
