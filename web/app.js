@@ -65,8 +65,6 @@ const explanationStatusEl = document.getElementById("explanation-status");
 const explanationOutputEl = document.getElementById("explanation-output");
 const explainFileButton = document.getElementById("explain-file-button");
 const explainSelectionButton = document.getElementById("explain-selection-button");
-const explanationAddCommentButton = document.getElementById("explanation-add-comment-button");
-const explanationAddOverallButton = document.getElementById("explanation-add-overall-button");
 const aiChatInputEl = document.getElementById("ai-chat-input");
 const aiChatButton = document.getElementById("ai-chat-button");
 
@@ -106,6 +104,7 @@ let modifiedDecorations = [];
 let activeViewZones = [];
 let editorResizeObserver = null;
 let requestSequence = 0;
+const MAX_CHAT_SELECTION_CHARS = 12_000;
 
 const reviewFileById = new Map(reviewData.files.map((file) => [file.id, file]));
 let persistedReviewedFiles = reviewData.reviewedFiles && typeof reviewData.reviewedFiles === "object"
@@ -154,77 +153,6 @@ function inferLanguage(path) {
   if (lower.endsWith(".go")) return "go";
   if (lower.endsWith(".rb") || lower.endsWith(".rake") || lower.endsWith(".gemspec") || fileName === "gemfile" || fileName === "rakefile" || fileName === "capfile" || fileName === "guardfile" || fileName === "config.ru") return "ruby";
   return "plaintext";
-}
-
-function registerRubyLanguage() {
-  const languages = monacoApi.languages.getLanguages();
-  if (!languages.some((language) => language.id === "ruby")) {
-    monacoApi.languages.register({
-      id: "ruby",
-      extensions: [".rb", ".rake", ".gemspec"],
-      filenames: ["Gemfile", "Rakefile", "Capfile", "Guardfile", "config.ru"],
-      aliases: ["Ruby", "ruby"],
-    });
-  }
-
-  monacoApi.languages.setLanguageConfiguration("ruby", {
-    comments: { lineComment: "#", blockComment: ["=begin", "=end"] },
-    brackets: [["{", "}"], ["[", "]"], ["(", ")"]],
-    autoClosingPairs: [
-      { open: "{", close: "}" },
-      { open: "[", close: "]" },
-      { open: "(", close: ")" },
-      { open: '"', close: '"' },
-      { open: "'", close: "'" },
-    ],
-    surroundingPairs: [
-      { open: "{", close: "}" },
-      { open: "[", close: "]" },
-      { open: "(", close: ")" },
-      { open: '"', close: '"' },
-      { open: "'", close: "'" },
-    ],
-  });
-
-  monacoApi.languages.setMonarchTokensProvider("ruby", {
-    defaultToken: "",
-    tokenPostfix: ".ruby",
-    keywords: [
-      "BEGIN", "END", "alias", "and", "begin", "break", "case", "class", "def", "defined", "do", "else", "elsif", "end", "ensure", "false", "for", "if", "in", "module", "next", "nil", "not", "or", "redo", "rescue", "retry", "return", "self", "super", "then", "true", "undef", "unless", "until", "when", "while", "yield",
-    ],
-    builtins: ["Array", "Hash", "String", "Symbol", "Integer", "Float", "Numeric", "Object", "Class", "Module", "Kernel", "Enumerable", "raise", "puts", "print", "require", "include", "extend", "attr_reader", "attr_writer", "attr_accessor", "private", "protected", "public"],
-    tokenizer: {
-      root: [
-        [/#[^\\r\\n]*/, "comment"],
-        [/=begin/, "comment", "@comment"],
-        [/[A-Z][\\w]*(?:::[A-Z][\\w]*)*/, "type.identifier"],
-        [/[a-zA-Z_]\\w*[!?=]?/, { cases: { "@keywords": "keyword", "@builtins": "predefined", "@default": "identifier" } }],
-        [/@{1,2}[a-zA-Z_]\\w*/, "variable"],
-        [/:[a-zA-Z_]\\w*[!?=]?/, "string.symbol"],
-        [/\\d+(?:_\\d+)*(?:\\.\\d+(?:_\\d+)*)?/, "number"],
-        [/"/, "string", "@doubleString"],
-        [/'/, "string", "@singleString"],
-        [/[{}()\[\]]/, "@brackets"],
-        [/[;,.]/, "delimiter"],
-        [/[+\-*\/%=<>!&|^~]+/, "operator"],
-      ],
-      comment: [
-        [/=end/, "comment", "@pop"],
-        [/.*$/, "comment"],
-      ],
-      doubleString: [
-        [/[^\\\\"#]+/, "string"],
-        [/#[{][^}]*[}]/, "string.interpolated"],
-        [/\\\\./, "string.escape"],
-        [/"/, "string", "@pop"],
-      ],
-      singleString: [
-        [/[^\\\\']+/, "string"],
-        [/\\\\./, "string.escape"],
-        [/'/, "string", "@pop"],
-      ],
-    },
-  });
 }
 
 function selectedBranchComparison() {
@@ -606,6 +534,23 @@ function explanationStatusClass(status) {
   }
 }
 
+function markdownToHtml(value) {
+  const text = String(value || "");
+  try {
+    if (window.marked?.parse && window.DOMPurify?.sanitize) {
+      const rawHtml = window.marked.parse(text, { gfm: true, breaks: false });
+      return window.DOMPurify.sanitize(rawHtml, { USE_PROFILES: { html: true } });
+    }
+  } catch (error) {
+    sendClientLog("warn", "markdown render failed", { message: error instanceof Error ? error.message : String(error) });
+  }
+  return escapeHtml(text).replace(/\n/g, "<br>");
+}
+
+function setMarkdownContent(element, content) {
+  element.innerHTML = markdownToHtml(content);
+}
+
 function renderAiMessage(message) {
   const wrapper = document.createElement("div");
   wrapper.className = message.role === "user"
@@ -618,8 +563,8 @@ function renderAiMessage(message) {
   wrapper.appendChild(label);
 
   const body = document.createElement("div");
-  body.className = "whitespace-pre-wrap text-sm leading-6 text-review-text";
-  body.textContent = message.content || "";
+  body.className = "markdown-body text-sm leading-6 text-review-text";
+  setMarkdownContent(body, message.content || "");
   wrapper.appendChild(body);
 
   return wrapper;
@@ -631,8 +576,6 @@ function renderExplanationPanel() {
   const fileReady = file != null && isActiveFileReady();
   explainFileButton.disabled = !file || !fileReady || busy;
   explainSelectionButton.disabled = !file || !fileReady || busy;
-  explanationAddCommentButton.disabled = !state.explanation.markdown || !state.explanation.source || busy;
-  explanationAddOverallButton.disabled = !state.explanation.markdown || busy;
   aiChatButton.disabled = busy || aiChatInputEl.value.trim().length === 0;
 
   explanationTitleEl.textContent = state.explanation.title || "AI assistant";
@@ -659,13 +602,13 @@ function renderExplanationPanel() {
   }
 
   const fallback = document.createElement("div");
-  fallback.className = "whitespace-pre-wrap";
+  fallback.className = "markdown-body text-sm leading-6 text-review-text";
   if (state.explanation.status === "loading") {
     fallback.textContent = "Asking the current pi model to review this...";
   } else if (state.explanation.status === "error") {
     fallback.textContent = state.explanation.error || "Unable to generate an AI response.";
   } else if (state.explanation.markdown) {
-    fallback.textContent = state.explanation.markdown;
+    setMarkdownContent(fallback, state.explanation.markdown);
   } else if (!file) {
     fallback.textContent = "Pick a file, then ask for an explanation or a follow-up review question.";
   } else if (!fileReady) {
@@ -695,14 +638,17 @@ function lineRangeFromEditor(editor) {
   return { startLine: line, endLine: line, hasSelection: false };
 }
 
-function getExplainSelectionTarget() {
-  const file = activeFile();
-  if (!file || !diffEditor) return null;
-
-  const candidates = [
+function getSelectableEditorCandidates(file) {
+  if (!file || !diffEditor) return [];
+  return [
     { side: "original", editor: diffEditor.getOriginalEditor() },
     { side: "modified", editor: diffEditor.getModifiedEditor() },
   ].filter((candidate) => canCommentOnSide(file, candidate.side));
+}
+
+function getExplainSelectionTarget() {
+  const file = activeFile();
+  const candidates = getSelectableEditorCandidates(file);
 
   if (candidates.length === 0) return null;
 
@@ -717,6 +663,33 @@ function getExplainSelectionTarget() {
     startLine: range.startLine,
     endLine: range.endLine,
     hasSelection: range.hasSelection,
+  };
+}
+
+function getChatSelectionContext() {
+  const file = activeFile();
+  if (!file || !isActiveFileReady()) return null;
+
+  const selectedCandidates = getSelectableEditorCandidates(file)
+    .map((candidate) => ({ ...candidate, selection: candidate.editor.getSelection?.() }))
+    .filter((candidate) => selectionHasRange(candidate.selection));
+  if (selectedCandidates.length === 0) return null;
+
+  const candidate = selectedCandidates.find((item) => item.editor.hasTextFocus?.()) ?? selectedCandidates[0];
+  const selection = candidate.selection;
+  const model = candidate.editor.getModel?.();
+  const selectedText = model?.getValueInRange?.(selection) ?? "";
+  const truncated = selectedText.length > MAX_CHAT_SELECTION_CHARS;
+  const text = truncated
+    ? `${selectedText.slice(0, MAX_CHAT_SELECTION_CHARS)}\n\n[... ${selectedText.length - MAX_CHAT_SELECTION_CHARS} selected characters omitted ...]`
+    : selectedText;
+
+  return {
+    side: candidate.side,
+    startLine: Math.min(selection.startLineNumber, selection.endLineNumber),
+    endLine: Math.max(selection.startLineNumber, selection.endLineNumber),
+    text,
+    truncated,
   };
 }
 
@@ -802,34 +775,6 @@ function requestExplanation(kind) {
   }
 }
 
-function addExplanationToOverallNote() {
-  if (!state.explanation.markdown) return;
-  const title = state.explanation.title || "AI explanation";
-  const addition = `AI explanation — ${title}\n\n${state.explanation.markdown}`;
-  state.overallComment = [state.overallComment.trim(), addition].filter(Boolean).join("\n\n");
-  renderTree();
-}
-
-function addExplanationAsComment() {
-  if (!state.explanation.markdown || !state.explanation.source) return;
-  const source = state.explanation.source;
-  const file = reviewFileById.get(source.fileId);
-  if (!file) return;
-
-  state.comments.push({
-    id: `${Date.now()}:${Math.random().toString(16).slice(2)}`,
-    fileId: file.id,
-    scope: source.scope,
-    branch: source.branch,
-    side: source.side ?? "file",
-    startLine: source.startLine ?? null,
-    endLine: source.endLine ?? null,
-    body: `AI explanation:\n\n${state.explanation.markdown}`,
-  });
-  submitButton.disabled = false;
-  updateCommentsUI();
-}
-
 function requestAiChat() {
   const question = aiChatInputEl.value.trim();
   if (!question || state.explanation.status === "loading" || state.explanation.status === "chatting") return;
@@ -863,6 +808,7 @@ function requestAiChat() {
       branch,
       question,
       contextMarkdown: state.explanation.markdown || "",
+      selection: getChatSelectionContext(),
       messages: previousMessages,
     });
   } else {
@@ -1591,7 +1537,6 @@ function setupMonaco() {
 
   window.require(["vs/editor/editor.main"], function () {
     monacoApi = window.monaco;
-    registerRubyLanguage();
 
     monacoApi.editor.defineTheme("review-dark", {
       base: "vs-dark",
@@ -1690,14 +1635,6 @@ explainFileButton.addEventListener("click", () => {
 
 explainSelectionButton.addEventListener("click", () => {
   requestExplanation("selection");
-});
-
-explanationAddCommentButton.addEventListener("click", () => {
-  addExplanationAsComment();
-});
-
-explanationAddOverallButton.addEventListener("click", () => {
-  addExplanationToOverallNote();
 });
 
 aiChatButton.addEventListener("click", () => {

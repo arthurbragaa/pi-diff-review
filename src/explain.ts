@@ -1,6 +1,6 @@
 import { complete, type UserMessage } from "@mariozechner/pi-ai";
 import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
-import type { ReviewChatMessage, ReviewFile, ReviewFileContents, ReviewScope } from "./types.js";
+import type { ReviewAiChatSelection, ReviewChatMessage, ReviewFile, ReviewFileContents, ReviewScope } from "./types.js";
 
 const SYSTEM_PROMPT = `You explain source files and diffs to a developer using a review UI.
 
@@ -179,6 +179,21 @@ function buildSelectionPrompt(file: ReviewFile, scope: ReviewScope, branch: stri
   ].join("\n");
 }
 
+function buildChatSelectionContext(file: ReviewFile | null, selection: ReviewAiChatSelection | null): string {
+  if (selection == null) return "No selected diff range was provided.";
+  const sideLabel = selection.side === "original" ? "original/old side" : "modified/new side";
+  const language = file == null ? "" : fenceLanguage(file.path);
+  return [
+    `Path: ${file?.path ?? "unknown"}`,
+    `Side: ${sideLabel}`,
+    `Lines: ${selection.startLine}-${selection.endLine}${selection.truncated ? " (selection truncated)" : ""}`,
+    "",
+    `\`\`\`${language}`,
+    selection.text,
+    "```",
+  ].join("\n");
+}
+
 function buildChatPrompt(options: {
   repoRoot: string;
   file: ReviewFile | null;
@@ -187,6 +202,7 @@ function buildChatPrompt(options: {
   contents: ReviewFileContents | null;
   contextMarkdown: string;
   projectContextMarkdown: string;
+  selection: ReviewAiChatSelection | null;
   messages: ReviewChatMessage[];
   question: string;
 }): string {
@@ -207,6 +223,9 @@ function buildChatPrompt(options: {
     "",
     `Current file context:`,
     fileSection,
+    "",
+    `Selected diff context:`,
+    buildChatSelectionContext(options.file, options.selection),
     "",
     `Additional project context:`,
     options.projectContextMarkdown || "No additional project files were loaded for this question.",
@@ -286,6 +305,7 @@ export async function answerReviewQuestion(
     contents: ReviewFileContents | null;
     contextMarkdown: string;
     projectContextMarkdown: string;
+    selection: ReviewAiChatSelection | null;
     messages: ReviewChatMessage[];
     question: string;
   },

@@ -24,9 +24,8 @@ The command:
 6. lazy-loads file contents on demand as you switch files and scopes
 7. lets you draft comments on the original side, modified side, or whole file
 8. explains the current file or selected lines using the active pi model
-9. lets you ask follow-up questions in the resizable AI panel
-10. lets you add explanations to the overall note or as review comments
-11. inserts the resulting feedback prompt into an empty pi editor, or appends it if the editor already has text
+9. lets you ask follow-up questions in the resizable AI panel, including about selected diff ranges
+10. inserts the resulting feedback prompt into an empty pi editor, or appends it if the editor already has text
 
 Troubleshooting logs are written to `/tmp/pi-diff-review.log`.
 

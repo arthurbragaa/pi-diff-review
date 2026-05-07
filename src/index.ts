@@ -253,9 +253,9 @@ function formatProjectContextFile(path: string, content: string): string {
   return [`### ${path}`, "```", truncated, "```"].join("\n");
 }
 
-async function buildProjectChatContext(pi: ExtensionAPI, repoRoot: string, activeFile: ReviewFile | null, activeContents: ReviewFileContents | null, question: string, contextMarkdown: string): Promise<string> {
+async function buildProjectChatContext(pi: ExtensionAPI, repoRoot: string, activeFile: ReviewFile | null, activeContents: ReviewFileContents | null, question: string, contextMarkdown: string, selectedText: string): Promise<string> {
   const activePath = activeFile?.path ?? null;
-  const searchText = [question, contextMarkdown, activeContents?.modifiedContent ?? "", activeContents?.originalContent ?? ""].join("\n");
+  const searchText = [question, contextMarkdown, selectedText, activeContents?.modifiedContent ?? "", activeContents?.originalContent ?? ""].join("\n");
   const explicitHints = extractExplicitPathHints(question);
   const namespaceSymbols = extractNamespaceSymbols(searchText).slice(0, 12);
   const classWords = extractQuestionClassWords(question).slice(0, 8);
@@ -554,8 +554,9 @@ export default function (pi: ExtensionAPI) {
 
       try {
         const contents = file == null ? null : await loadContents(file, message.scope, message.branch);
-        const projectContextMarkdown = await buildProjectChatContext(pi, repoRoot, file, contents, message.question, message.contextMarkdown);
-        await logReview("debug", "project chat context loaded", { requestId: message.requestId, chars: projectContextMarkdown.length });
+        const selectedText = message.selection?.text ?? "";
+        const projectContextMarkdown = await buildProjectChatContext(pi, repoRoot, file, contents, message.question, message.contextMarkdown, selectedText);
+        await logReview("debug", "project chat context loaded", { requestId: message.requestId, chars: projectContextMarkdown.length, selectedChars: selectedText.length });
         const markdown = await answerReviewQuestion(ctx, {
           repoRoot,
           file,
@@ -564,6 +565,7 @@ export default function (pi: ExtensionAPI) {
           contents,
           contextMarkdown: message.contextMarkdown,
           projectContextMarkdown,
+          selection: message.selection,
           messages: message.messages,
           question: message.question,
         });

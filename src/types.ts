@@ -97,6 +97,14 @@ export interface ReviewChatMessage {
   content: string;
 }
 
+export interface ReviewAiChatSelection {
+  side: "original" | "modified";
+  startLine: number;
+  endLine: number;
+  text: string;
+  truncated: boolean;
+}
+
 export interface ReviewAiChatPayload {
   type: "ai-chat";
   requestId: string;
@@ -105,6 +113,7 @@ export interface ReviewAiChatPayload {
   branch: string | null;
   question: string;
   contextMarkdown: string;
+  selection: ReviewAiChatSelection | null;
   messages: ReviewChatMessage[];
 }
 
